@@ -120,6 +120,11 @@ func (dc *DragonflyConsumer) handleQuote(m *nats.Msg) {
 	dc.saveToTimeSeries(quote)   // Временные ряды
 	dc.updateStatistics(quote)   // Статистика
 
+	// Публикуем обновление для WebSocket клиентов
+	updateChannel := fmt.Sprintf("updates:%s:%s", quote.Symbol, quote.Market)
+	updateData, _ := json.Marshal(quote)
+	dc.redisClient.Publish(dc.ctx, updateChannel, updateData)
+
 	log.Printf("💾 Сохранено в Dragonfly: [%s] %s = %.4f",
 		quote.Market, quote.Symbol, quote.Price)
 }

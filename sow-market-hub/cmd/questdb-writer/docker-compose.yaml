@@ -1,0 +1,18 @@
+version: '3.8'
+services:
+  questdb:
+    image: questdb/questdb:latest
+    ports:
+      - "9000:9000"    # Web Console
+      - "8812:8812"    # Postgres wire protocol
+      - "9009:9009"    # InfluxDB line protocol
+    volumes:
+      - questdb_data:/var/lib/questdb
+    environment:
+      - QDB_CAIRO_SQL_COPY_WORK_ROOT=/tmp
+      - QDB_PG_ENABLED=true
+      - QDB_HTTP_ENABLED=true
+      - QDB_LINE_TCP_ENABLED=true
+
+volumes:
+  questdb_data:

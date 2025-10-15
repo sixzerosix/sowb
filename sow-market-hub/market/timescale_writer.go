@@ -35,7 +35,7 @@ func NewTimescaleWriter(dragonflyURL, timescaleURL string) (*TimescaleWriter, er
 
 	// Проверяем подключения
 	ctx := context.Background()
-	if err := redisClient.Ping(ctx).Result(); err != nil {
+	if _, err := redisClient.Ping(ctx).Result(); err != nil {
 		return nil, fmt.Errorf("ошибка подключения к Dragonfly: %w", err)
 	}
 

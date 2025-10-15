@@ -40,7 +40,7 @@ func NewQuestDBWriter(dragonflyURL, questdbURL string) (*QuestDBWriter, error) {
 
 	// Проверяем подключения
 	ctx := context.Background()
-	if err := redisClient.Ping(ctx).Result(); err != nil {
+	if _, err := redisClient.Ping(ctx).Result(); err != nil {
 		return nil, fmt.Errorf("ошибка подключения к Dragonfly: %w", err)
 	}
 
@@ -323,16 +323,6 @@ func (qw *QuestDBWriter) GetPriceStats(symbol, market string, interval string) (
 }
 
 // MarketDataPoint расширенная структура
-type MarketDataPoint struct {
-	Time      time.Time `json:"time"`
-	Symbol    string    `json:"symbol"`
-	Market    string    `json:"market"`
-	Price     float64   `json:"price"`
-	Volume    float64   `json:"volume,omitempty"`
-	High24h   float64   `json:"high24h,omitempty"`
-	Low24h    float64   `json:"low24h,omitempty"`
-	Change24h float64   `json:"change24h,omitempty"`
-}
 
 // PriceStats статистика по ценам
 type PriceStats struct {

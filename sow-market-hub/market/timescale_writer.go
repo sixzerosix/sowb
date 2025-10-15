@@ -60,6 +60,9 @@ func (tw *TimescaleWriter) CreateTables() error {
 		market      TEXT NOT NULL,
 		price       DECIMAL(20,8) NOT NULL,
 		volume      DECIMAL(20,8),
+		high24h     DECIMAL(20,8),
+		low24h      DECIMAL(20,8),
+		change24h   DECIMAL(20,8),
 		created_at  TIMESTAMPTZ DEFAULT NOW()
 	);
 
@@ -160,8 +163,8 @@ func (tw *TimescaleWriter) saveBatchToTimescale(symbol, market string, data []st
 
 	// Подготавливаем statement
 	stmt, err := tx.Prepare(`
-		INSERT INTO market_data (time, symbol, market, price) 
-		VALUES ($1, $2, $3, $4)
+		INSERT INTO market_data (time, symbol, market, price, volume, high24h, low24h, change24h) 
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 	`)
 	if err != nil {
 		log.Printf("❌ Ошибка подготовки statement: %v", err)
@@ -172,21 +175,16 @@ func (tw *TimescaleWriter) saveBatchToTimescale(symbol, market string, data []st
 	saved := 0
 	for _, item := range data {
 		// Парсим JSON
-		var record struct {
-			Price     float64 `json:"price"`
-			Timestamp int64   `json:"timestamp"`
-		}
-
+		var record MarketDataPoint
 		if err := json.Unmarshal([]byte(item), &record); err != nil {
 			log.Printf("❌ Ошибка парсинга JSON: %v", err)
 			continue
 		}
 
-		// Конвертируем timestamp
-		timestamp := time.Unix(record.Timestamp, 0)
-
 		// Вставляем запись
-		_, err := stmt.Exec(timestamp, symbol, market, record.Price)
+		_, err := stmt.Exec(
+			record.Time, record.Symbol, record.Market, record.Price,
+			record.Volume, record.High24h, record.Low24h, record.Change24h)
 		if err != nil {
 			log.Printf("❌ Ошибка вставки записи: %v", err)
 			continue
@@ -207,7 +205,7 @@ func (tw *TimescaleWriter) saveBatchToTimescale(symbol, market string, data []st
 // GetHistoricalData получает исторические данные из TimescaleDB
 func (tw *TimescaleWriter) GetHistoricalData(symbol, market string, from, to time.Time) ([]MarketDataPoint, error) {
 	query := `
-		SELECT time, symbol, market, price 
+		SELECT time, symbol, market, price, volume, high24h, low24h, change24h 
 		FROM market_data 
 		WHERE symbol = $1 AND market = $2 AND time BETWEEN $3 AND $4
 		ORDER BY time DESC
@@ -222,7 +220,9 @@ func (tw *TimescaleWriter) GetHistoricalData(symbol, market string, from, to tim
 	var results []MarketDataPoint
 	for rows.Next() {
 		var point MarketDataPoint
-		err := rows.Scan(&point.Time, &point.Symbol, &point.Market, &point.Price)
+		err := rows.Scan(
+			&point.Time, &point.Symbol, &point.Market, &point.Price,
+			&point.Volume, &point.High24h, &point.Low24h, &point.Change24h)
 		if err != nil {
 			continue
 		}
@@ -232,10 +232,4 @@ func (tw *TimescaleWriter) GetHistoricalData(symbol, market string, from, to tim
 	return results, nil
 }
 
-// MarketDataPoint представляет точку данных
-type MarketDataPoint struct {
-	Time   time.Time `json:"time"`
-	Symbol string    `json:"symbol"`
-	Market string    `json:"market"`
-	Price  float64   `json:"price"`
-}
+

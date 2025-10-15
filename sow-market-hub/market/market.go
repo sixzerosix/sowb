@@ -51,7 +51,7 @@ func NewMarketListener() *MarketListener {
 	logger.SetFormatter(&logrus.JSONFormatter{})
 
 	// Загружаем конфиг или используем дефолтный
-	config := loadConfig()
+	config := LoadConfig()
 
 	// Устанавливаем уровень логирования
 	level, err := logrus.ParseLevel(config.LogLevel)
@@ -79,8 +79,8 @@ func (ml *MarketListener) SetDataHandler(handler MarketDataHandler) {
 	ml.dataHandler = handler
 }
 
-// loadConfig загружает конфигурацию
-func loadConfig() *Config {
+// LoadConfig загружает конфигурацию
+func LoadConfig() *Config {
 	// Пытаемся загрузить из файла
 	if data, err := os.ReadFile("config.json"); err == nil {
 		var config Config

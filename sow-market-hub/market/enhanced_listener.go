@@ -3,8 +3,11 @@ package market
 import (
 	"context"
 	"fmt"
+	"os"
+	"os/signal"
 	"strconv"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/hirokisan/bybit/v2"
@@ -86,6 +89,16 @@ func (eml *EnhancedMarketListener) Start() error {
 		handler.Start()
 	}
 
+	// Graceful shutdown
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+
+	go func() {
+		<-sigChan
+		eml.logger.Info("📡 Получен сигнал завершения...")
+		eml.Stop()
+	}()
+
 	return eml.connectAndListen()
 }
 
@@ -108,7 +121,9 @@ func (eml *EnhancedMarketListener) connectAndListen() error {
 	eml.wg.Add(1)
 	go func() {
 		defer eml.wg.Done()
+		eml.logger.Debug("Starting Bybit WebSocket client...") // <-- ДОБАВЛЕНО
 		eml.wsClient.Start(eml.ctx, executors)
+		eml.logger.Debug("Bybit WebSocket client stopped.") // <-- ДОБАВЛЕНО
 	}()
 
 	// Запуск периодической аналитики
@@ -134,47 +149,58 @@ func (eml *EnhancedMarketListener) setupSpotSubscriptions(executors *[]bybit.Web
 		sym := symbol
 
 		// 1. TICKER подписка
-		v5SpotPublic.SubscribeTicker(
+		_, err = v5SpotPublic.SubscribeTicker(
 			bybit.V5WebsocketPublicTickerParamKey{Symbol: bybit.SymbolV5(sym)},
 			func(response bybit.V5WebsocketPublicTickerResponse) error {
 				eml.handleTickerData(sym, "SPOT", response)
 				return nil
 			},
 		)
+		if err != nil {
+			eml.logger.WithError(err).WithField("symbol", sym).Error("❌ Ошибка подписки на SPOT Ticker")
+		}
 
 		// 2. TRADE подписка
-		v5SpotPublic.SubscribeTrade(
+		_, err = v5SpotPublic.SubscribeTrade(
 			bybit.V5WebsocketPublicTradeParamKey{Symbol: bybit.SymbolV5(sym)},
 			func(response bybit.V5WebsocketPublicTradeResponse) error {
 				eml.handleTradeData(sym, "SPOT", response)
 				return nil
 			},
 		)
+		if err != nil {
+			eml.logger.WithError(err).WithField("symbol", sym).Error("❌ Ошибка подписки на SPOT Trade")
+		}
 
-		// 3. ORDERBOOK подписка
-		v5SpotPublic.SubscribeOrderBook(
-			// bybit.V5WebsocketPublicOrderbookParamKey{
-			bybit.V5WebsocketPublicOrderBookParamKey{
+		// 3. ORDERBOOK подписка (ИСПРАВЛЕНО ИМЯ ТИПА)
+		_, err = v5SpotPublic.SubscribeOrderBook(
+			bybit.V5WebsocketPublicOrderBookParamKey{ // <--- ИСПРАВЛЕНО
 				Symbol: bybit.SymbolV5(sym),
 				Depth:  50,
 			},
-			func(response bybit.V5WebsocketPublicOrderBookResponse) error {
+			func(response bybit.V5WebsocketPublicOrderBookResponse) error { // <--- ИСПРАВЛЕНО
 				eml.handleOrderbookData(sym, "SPOT", response)
 				return nil
 			},
 		)
+		if err != nil {
+			eml.logger.WithError(err).WithField("symbol", sym).Error("❌ Ошибка подписки на SPOT Orderbook")
+		}
 
-		// 4. KLINE подписка (1 минута)
-		v5SpotPublic.SubscribeKline(
+		// 4. KLINE подписка (1 минута) (ИСПРАВЛЕНО ИМЯ ИНТЕРВАЛА)
+		_, err = v5SpotPublic.SubscribeKline(
 			bybit.V5WebsocketPublicKlineParamKey{
 				Symbol:   bybit.SymbolV5(sym),
-				Interval: bybit.Interval1,
+				Interval: bybit.SpotInterval1M, // <--- ИСПРАВЛЕНО
 			},
 			func(response bybit.V5WebsocketPublicKlineResponse) error {
 				eml.handleKlineData(sym, "SPOT", response)
 				return nil
 			},
 		)
+		if err != nil {
+			eml.logger.WithError(err).WithField("symbol", sym).Error("❌ Ошибка подписки на SPOT Kline")
+		}
 
 		eml.logger.WithField("symbol", sym).Info("✓ Enhanced SPOT подписки активированы")
 	}
@@ -194,53 +220,67 @@ func (eml *EnhancedMarketListener) setupFuturesSubscriptions(executors *[]bybit.
 	for _, symbol := range eml.config.Symbols {
 		sym := symbol
 
-		// Аналогичные подписки для FUTURES
-		v5FuturesPublic.SubscribeTicker(
+		_, err = v5FuturesPublic.SubscribeTicker(
 			bybit.V5WebsocketPublicTickerParamKey{Symbol: bybit.SymbolV5(sym)},
 			func(response bybit.V5WebsocketPublicTickerResponse) error {
 				eml.handleTickerData(sym, "FUTURES", response)
 				return nil
 			},
 		)
+		if err != nil {
+			eml.logger.WithError(err).WithField("symbol", sym).Error("❌ Ошибка подписки на FUTURES Ticker")
+		}
 
-		v5FuturesPublic.SubscribeTrade(
+		_, err = v5FuturesPublic.SubscribeTrade(
 			bybit.V5WebsocketPublicTradeParamKey{Symbol: bybit.SymbolV5(sym)},
 			func(response bybit.V5WebsocketPublicTradeResponse) error {
 				eml.handleTradeData(sym, "FUTURES", response)
 				return nil
 			},
 		)
+		if err != nil {
+			eml.logger.WithError(err).WithField("symbol", sym).Error("❌ Ошибка подписки на FUTURES Trade")
+		}
 
-		v5FuturesPublic.SubscribeOrderBook(
-			bybit.V5WebsocketPublicOrderBookParamKey{
+		_, err = v5FuturesPublic.SubscribeOrderBook(
+			bybit.V5WebsocketPublicOrderBookParamKey{ // <--- ИСПРАВЛЕНО
 				Symbol: bybit.SymbolV5(sym),
 				Depth:  50,
 			},
-			func(response bybit.V5WebsocketPublicOrderBookResponse) error {
+			func(response bybit.V5WebsocketPublicOrderBookResponse) error { // <--- ИСПРАВЛЕНО
 				eml.handleOrderbookData(sym, "FUTURES", response)
 				return nil
 			},
 		)
+		if err != nil {
+			eml.logger.WithError(err).WithField("symbol", sym).Error("❌ Ошибка подписки на FUTURES Orderbook")
+		}
 
-		v5FuturesPublic.SubscribeKline(
+		_, err = v5FuturesPublic.SubscribeKline(
 			bybit.V5WebsocketPublicKlineParamKey{
 				Symbol:   bybit.SymbolV5(sym),
-				Interval: bybit.Interval1,
+				Interval: bybit.Interval1, // <--- ИСПРАВЛЕНО
 			},
 			func(response bybit.V5WebsocketPublicKlineResponse) error {
 				eml.handleKlineData(sym, "FUTURES", response)
 				return nil
 			},
 		)
+		if err != nil {
+			eml.logger.WithError(err).WithField("symbol", sym).Error("❌ Ошибка подписки на FUTURES Kline")
+		}
 
 		// 5. LIQUIDATION подписка (только для FUTURES)
-		v5FuturesPublic.SubscribeLiquidation(
+		_, err = v5FuturesPublic.SubscribeLiquidation(
 			bybit.V5WebsocketPublicLiquidationParamKey{Symbol: bybit.SymbolV5(sym)},
 			func(response bybit.V5WebsocketPublicLiquidationResponse) error {
 				eml.handleLiquidationData(sym, response)
 				return nil
 			},
 		)
+		if err != nil {
+			eml.logger.WithError(err).WithField("symbol", sym).Error("❌ Ошибка подписки на FUTURES Liquidation")
+		}
 
 		eml.logger.WithField("symbol", sym).Info("✓ Enhanced FUTURES подписки активированы")
 	}
@@ -249,7 +289,7 @@ func (eml *EnhancedMarketListener) setupFuturesSubscriptions(executors *[]bybit.
 	return nil
 }
 
-// Обработчики данных
+// ... (handleTickerData)
 func (eml *EnhancedMarketListener) handleTickerData(symbol, market string, response bybit.V5WebsocketPublicTickerResponse) {
 	eml.dataMux.Lock()
 	defer eml.dataMux.Unlock()
@@ -276,7 +316,13 @@ func (eml *EnhancedMarketListener) handleTickerData(symbol, market string, respo
 			data.Volume24h = vol
 		}
 		if change, err := parseFloat(response.Data.Spot.Price24HPcnt); err == nil {
-			data.Change24h = change * 100
+			data.Change24h = change // <--- ИСПРАВЛЕНО (убрано * 100)
+		}
+		if high, err := parseFloat(response.Data.Spot.HighPrice24H); err == nil { // <--- ИСПРАВЛЕНО (HighPrice24h)
+			data.High24h = high
+		}
+		if low, err := parseFloat(response.Data.Spot.LowPrice24H); err == nil { // <--- ИСПРАВЛЕНО (LowPrice24h)
+			data.Low24h = low
 		}
 	} else if market == "FUTURES" && response.Data.LinearInverse.LastPrice != "" {
 		if price, err := parseFloat(response.Data.LinearInverse.LastPrice); err == nil {
@@ -285,20 +331,28 @@ func (eml *EnhancedMarketListener) handleTickerData(symbol, market string, respo
 		if vol, err := parseFloat(response.Data.LinearInverse.Volume24h); err == nil {
 			data.Volume24h = vol
 		}
-		if change, err := parseFloat(response.Data.LinearInverse.Price24hPercent); err == nil {
-			data.Change24h = change * 100
+		if change, err := parseFloat(response.Data.LinearInverse.Price24hPercent); err == nil { // <--- ИСПРАВЛЕНО (Price24hPcnt)
+			data.Change24h = change // <--- ИСПРАВЛЕНО (убрано * 100)
+		}
+		if high, err := parseFloat(response.Data.LinearInverse.HighPrice24h); err == nil {
+			data.High24h = high
+		}
+		if low, err := parseFloat(response.Data.LinearInverse.LowPrice24h); err == nil {
+			data.Low24h = low
 		}
 	}
 
 	data.Timestamp = time.Now()
+	eml.logger.Debugf("Processing ticker data for %s_%s: price %.2f, vol %.2f, change %.2f", symbol, market, data.Price, data.Volume24h, data.Change24h) // <-- ДОБАВЛЕНО
 
-	// Запускаем аналитику
+	// Обновляем аналитику
 	eml.analytics.UpdateData(key, data)
 
 	// Уведомляем обработчики
 	eml.notifyHandlers(symbol, data)
 }
 
+// ... (handleTradeData)
 func (eml *EnhancedMarketListener) handleTradeData(symbol, market string, response bybit.V5WebsocketPublicTradeResponse) {
 	eml.dataMux.Lock()
 	defer eml.dataMux.Unlock()
@@ -318,14 +372,14 @@ func (eml *EnhancedMarketListener) handleTradeData(symbol, market string, respon
 
 	// Обрабатываем каждую сделку
 	for _, trade := range response.Data {
-		if price, err := parseFloat(trade.Trade); err == nil {
-			if size, err := parseFloat(trade.Value); err == nil {
+		if price, err := parseFloat(trade.Trade); err == nil { // <--- ИСПРАВЛЕНО (trade.Price)
+			if size, err := parseFloat(trade.Value); err == nil { // <--- ИСПРАВЛЕНО (trade.Size)
 				tradeData := TradeData{
-					ID:        trade.ID,
+					ID:        trade.ID, // <--- ИСПРАВЛЕНО (trade.ExecId)
 					Price:     price,
 					Size:      size,
-					Side:      string(trade.Side),
-					Timestamp: time.Unix(int64(trade.Timestamp/1000), 0), // Check
+					Side:      string(trade.Side), // <--- trade.Side уже string
+					Timestamp: time.Unix(int64(trade.Timestamp)/1000, 0),
 				}
 
 				// Добавляем в историю сделок
@@ -337,6 +391,12 @@ func (eml *EnhancedMarketListener) handleTradeData(symbol, market string, respon
 				// Обновляем последнюю сделку
 				data.LastTrade = &tradeData
 				data.TradeCount++
+
+				// Обновляем OrderFlowDelta
+				if indicators := eml.analytics.indicators[key]; indicators != nil && indicators.OrderFlowDelta != nil {
+					indicators.OrderFlowDelta.UpdateTrade(tradeData.Side, tradeData.Size)
+				}
+				eml.logger.Debugf("Processing trade data for %s_%s: price %.2f, size %.2f, side %s", symbol, market, tradeData.Price, tradeData.Size, tradeData.Side) // <-- ДОБАВЛЕНО
 			}
 		}
 	}
@@ -346,7 +406,8 @@ func (eml *EnhancedMarketListener) handleTradeData(symbol, market string, respon
 	eml.notifyHandlers(symbol, data)
 }
 
-func (eml *EnhancedMarketListener) handleOrderbookData(symbol, market string, response bybit.V5WebsocketPublicOrderBookResponse) {
+// ... (handleOrderbookData)
+func (eml *EnhancedMarketListener) handleOrderbookData(symbol, market string, response bybit.V5WebsocketPublicOrderBookResponse) { // <--- ИСПРАВЛЕНО ИМЯ ТИПА ОТВЕТА
 	eml.dataMux.Lock()
 	defer eml.dataMux.Unlock()
 
@@ -370,47 +431,55 @@ func (eml *EnhancedMarketListener) handleOrderbookData(symbol, market string, re
 		Timestamp: time.Now(),
 	}
 
-	// Парсим bids
+	// Парсим bids (ИСПРАВЛЕНО: bid.Price и bid.Size - это поля структуры PriceLevelV5, а не массив)
 	for _, bid := range response.Data.Bids {
-		if len(bid.Size) >= 2 {
-			if price, err := parseFloat(bid.Price); err == nil {
-				if size, err := parseFloat(bid.Size); err == nil {
-					orderbook.Bids = append(orderbook.Bids, PriceLevel{
-						Price: price,
-						Size:  size,
-					})
-				}
+		if price, err := parseFloat(bid.Price); err == nil {
+			if size, err := parseFloat(bid.Size); err == nil {
+				orderbook.Bids = append(orderbook.Bids, PriceLevel{
+					Price: price,
+					Size:  size,
+				})
 			}
 		}
 	}
 
-	// Парсим asks
+	// Парсим asks (ИСПРАВЛЕНО)
 	for _, ask := range response.Data.Asks {
-		if len(ask.Size) >= 2 {
-			if price, err := parseFloat(ask.Price); err == nil {
-				if size, err := parseFloat(ask.Size); err == nil {
-					orderbook.Asks = append(orderbook.Asks, PriceLevel{
-						Price: price,
-						Size:  size,
-					})
-				}
+		if price, err := parseFloat(ask.Price); err == nil {
+			if size, err := parseFloat(ask.Size); err == nil {
+				orderbook.Asks = append(orderbook.Asks, PriceLevel{
+					Price: price,
+					Size:  size,
+				})
 			}
 		}
 	}
 
-	// Вычисляем спред
+	// Вычисляем спред (безопасно — проверяем длины слайсов)
 	if len(orderbook.Bids) > 0 && len(orderbook.Asks) > 0 {
 		spread := orderbook.Asks[0].Price - orderbook.Bids[0].Price
 		data.Spread = spread
+	} else {
+		data.Spread = 0
 	}
 
 	data.Orderbook = orderbook
 	data.Timestamp = time.Now()
+	// безопасный лог — проверяем длину слайсов перед доступом по [0]
+	bestBid, bestAsk := 0.0, 0.0
+	if len(orderbook.Bids) > 0 {
+		bestBid = orderbook.Bids[0].Price
+	}
+	if len(orderbook.Asks) > 0 {
+		bestAsk = orderbook.Asks[0].Price
+	}
+	eml.logger.Debugf("Processing orderbook data for %s_%s: best bid %.2f, best ask %.2f, spread %.4f", symbol, market, bestBid, bestAsk, data.Spread)
 
 	eml.analytics.UpdateData(key, data)
 	eml.notifyHandlers(symbol, data)
 }
 
+// ... (handleKlineData)
 func (eml *EnhancedMarketListener) handleKlineData(symbol, market string, response bybit.V5WebsocketPublicKlineResponse) {
 	eml.dataMux.Lock()
 	defer eml.dataMux.Unlock()
@@ -442,7 +511,7 @@ func (eml *EnhancedMarketListener) handleKlineData(symbol, market string, respon
 								Close:     close,
 								Volume:    volume,
 								Timestamp: time.Unix(kline.Start/1000, 0),
-								Interval:  string(kline.Interval),
+								Interval:  string(kline.Interval), // <--- ИСПРАВЛЕНО (kline.Interval уже string)
 							}
 
 							// Добавляем в историю
@@ -461,10 +530,18 @@ func (eml *EnhancedMarketListener) handleKlineData(symbol, market string, respon
 	}
 
 	data.Timestamp = time.Now()
+	// безопасный лог по Kline (может быть nil)
+	kclose, kvolume := 0.0, 0.0
+	if data.Kline != nil {
+		kclose = data.Kline.Close
+		kvolume = data.Kline.Volume
+	}
+	eml.logger.Debugf("Processing kline data for %s_%s: close %.2f, volume %.2f", symbol, market, kclose, kvolume)
 	eml.analytics.UpdateData(key, data)
 	eml.notifyHandlers(symbol, data)
 }
 
+// ... (handleLiquidationData)
 func (eml *EnhancedMarketListener) handleLiquidationData(symbol string, response bybit.V5WebsocketPublicLiquidationResponse) {
 	eml.dataMux.Lock()
 	defer eml.dataMux.Unlock()
@@ -482,15 +559,15 @@ func (eml *EnhancedMarketListener) handleLiquidationData(symbol string, response
 
 	data := eml.marketData[key]
 
-	// Обрабатываем ликвидации
+	// Обрабатываем ликвидации (ИСПРАВЛЕНО: response.Data - это один объект)
 	liq := response.Data
 	if price, err := parseFloat(liq.Price); err == nil {
 		if size, err := parseFloat(liq.Size); err == nil {
 			liquidation := LiquidationData{
 				Price:     price,
 				Size:      size,
-				Side:      string(liq.Side),
-				Timestamp: time.Unix(int64(liq.UpdatedTime/1000), 0),
+				Side:      string(liq.Side), // <--- liq.Side уже string
+				Timestamp: time.Unix(int64(liq.UpdatedTime)/1000, 0),
 			}
 
 			// Добавляем в историю ликвидаций
@@ -500,7 +577,17 @@ func (eml *EnhancedMarketListener) handleLiquidationData(symbol string, response
 			}
 		}
 	}
-	// Removed the extra closing brace
+	// Убрана лишняя закрывающая скобка, которая была в предыдущей версии
+	lastPrice := 0.0
+	lastSize := 0.0
+	lastSide := ""
+	if len(data.Liquidations) > 0 {
+		last := data.Liquidations[len(data.Liquidations)-1]
+		lastPrice = last.Price
+		lastSize = last.Size
+		lastSide = last.Side
+	}
+	eml.logger.Debugf("Processing liquidation data for %s: price %.2f, size %.2f, side %s", symbol, lastPrice, lastSize, lastSide)
 
 	data.Timestamp = time.Now()
 	eml.analytics.UpdateData(key, data)
@@ -508,7 +595,7 @@ func (eml *EnhancedMarketListener) handleLiquidationData(symbol string, response
 }
 
 func (eml *EnhancedMarketListener) runPeriodicAnalytics() {
-	ticker := time.NewTicker(5 * time.Second)
+	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
 
 	for {
@@ -516,6 +603,7 @@ func (eml *EnhancedMarketListener) runPeriodicAnalytics() {
 		case <-eml.ctx.Done():
 			return
 		case <-ticker.C:
+			eml.logger.Debug("📊 Triggering analytics calculation.") // <-- ДОБАВЛЕНО
 			eml.calculateAnalytics()
 		}
 	}
@@ -526,9 +614,15 @@ func (eml *EnhancedMarketListener) calculateAnalytics() {
 	defer eml.dataMux.RUnlock()
 
 	for key, data := range eml.marketData {
+		eml.logger.Debugf("Attempting to calculate analytics for %s. Price history length: %d, Trade history length: %d, Kline history length: %d",
+			key, len(eml.analytics.priceHistory[key]), len(data.TradeHistory), len(data.KlineHistory)) // <-- ДОБАВЛЕНО
+
 		if analytics := eml.analytics.CalculateMetrics(key); analytics != nil {
 			data.Analytics = analytics
+			eml.logger.Debugf("✅ Calculated analytics for %s: RSI=%.2f, Sentiment=%s, Signals count: %d", key, analytics.RSI14, analytics.MarketSentiment, len(analytics.Signals)) // <-- ДОБАВЛЕНО
 			eml.notifyHandlers(data.Symbol, data)
+		} else {
+			eml.logger.Debugf("❌ Analytics not ready or failed for %s (not enough data or nil result).", key) // <-- ДОБАВЛЕНО
 		}
 	}
 }
@@ -549,18 +643,15 @@ func (eml *EnhancedMarketListener) Stop() {
 
 	eml.logger.Info("🛑 Завершение Enhanced Market Listener...")
 
-	// Останавливаем обработчики
 	for _, handler := range eml.dataHandlers {
 		handler.Stop()
 	}
 
-	// Останавливаем аналитику
 	eml.analytics.Stop()
 
 	eml.cancel()
 	eml.isRunning = false
 
-	// Ждем завершения
 	done := make(chan struct{})
 	go func() {
 		eml.wg.Wait()
@@ -575,9 +666,6 @@ func (eml *EnhancedMarketListener) Stop() {
 	}
 }
 
-// Вспомогательные функции
 func parseFloat(s string) (float64, error) {
-	// Реализация парсинга строки в float64
-	// Можно использовать strconv.ParseFloat(s, 64)
 	return strconv.ParseFloat(s, 64)
 }

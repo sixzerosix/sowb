@@ -139,7 +139,38 @@ func (enp *EnhancedNATSPublisher) convertToQuoteData(data *EnhancedMarketData) *
 		Change24h: data.Change24h,
 		High24h:   data.High24h,
 		Low24h:    data.Low24h,
-		Analytics: data.Analytics,
+		// Analytics: data.Analytics, // <--- ЭТО НЕПРАВИЛЬНО. Нужно копировать данные, а не ссылку
+	}
+
+	// Копируем Analytics, если он есть
+	if data.Analytics != nil {
+		quote.Analytics = &AnalyticsMetrics{ // Создаем новый объект AnalyticsMetrics
+			BuyVolume1m:         data.Analytics.BuyVolume1m,
+			SellVolume1m:        data.Analytics.SellVolume1m,
+			BuyVolume5m:         data.Analytics.BuyVolume5m,
+			SellVolume5m:        data.Analytics.SellVolume5m,
+			BuySellRatio:        data.Analytics.BuySellRatio,
+			BidPressure:         data.Analytics.BidPressure,
+			AskPressure:         data.Analytics.AskPressure,
+			SpreadPercent:       data.Analytics.SpreadPercent,
+			LongLiquidations1m:  data.Analytics.LongLiquidations1m,
+			ShortLiquidations1m: data.Analytics.ShortLiquidations1m,
+			LiquidationRatio:    data.Analytics.LiquidationRatio,
+			RSI14:               data.Analytics.RSI14,
+			EMA12:               data.Analytics.EMA12,
+			EMA26:               data.Analytics.EMA26,
+			MACD:                data.Analytics.MACD,
+			MACDSignal:          data.Analytics.MACDSignal,
+			BollingerUpper:      data.Analytics.BollingerUpper,
+			BollingerMiddle:     data.Analytics.BollingerMiddle,
+			BollingerLower:      data.Analytics.BollingerLower,
+			PriceVelocity:       data.Analytics.PriceVelocity,
+			VolumeVelocity:      data.Analytics.VolumeVelocity,
+			Momentum5m:          data.Analytics.Momentum5m,
+			MarketSentiment:     data.Analytics.MarketSentiment,
+			SentimentScore:      data.Analytics.SentimentScore,
+			Signals:             data.Analytics.Signals, // Слайсы копируются по ссылке, но для сигналов это нормально
+		}
 	}
 
 	// Trade данные
@@ -159,13 +190,10 @@ func (enp *EnhancedNATSPublisher) convertToQuoteData(data *EnhancedMarketData) *
 			quote.BestAsk = data.Orderbook.Asks[0].Price
 		}
 		quote.Spread = data.Spread
-
-		// Вычисляем давление в стакане
-		if data.Analytics != nil {
-			quote.BidPressure = data.Analytics.BidPressure
-			quote.AskPressure = data.Analytics.AskPressure
-			quote.SpreadPercent = data.Analytics.SpreadPercent
-		}
+		// Давление в стакане уже есть в Analytics, поэтому здесь не нужно дублировать
+		// quote.BidPressure = data.Analytics.BidPressure (если data.Analytics == nil будет паника)
+		// quote.AskPressure = data.Analytics.AskPressure
+		// quote.SpreadPercent = data.Analytics.SpreadPercent
 	}
 
 	// Kline данные
@@ -271,27 +299,38 @@ func (enp *EnhancedNATSPublisher) publishKlineData(quote *EnhancedQuoteData) {
 
 func (enp *EnhancedNATSPublisher) publishAnalyticsData(quote *EnhancedQuoteData) {
 	if quote.Analytics == nil {
-		return
+		return // Нечего публиковать, если аналитика пуста
 	}
 
 	analyticsData := map[string]interface{}{
-		"symbol":           quote.Symbol,
-		"market":           quote.Market,
-		"timestamp":        quote.Timestamp,
-		"buy_volume_1m":    quote.Analytics.BuyVolume1m,
-		"sell_volume_1m":   quote.Analytics.SellVolume1m,
-		"buy_sell_ratio":   quote.Analytics.BuySellRatio,
-		"rsi_14":           quote.Analytics.RSI14,
-		"ema_12":           quote.Analytics.EMA12,
-		"ema_26":           quote.Analytics.EMA26,
-		"macd":             quote.Analytics.MACD,
-		"macd_signal":      quote.Analytics.MACDSignal,
-		"bollinger_upper":  quote.Analytics.BollingerUpper,
-		"bollinger_middle": quote.Analytics.BollingerMiddle,
-		"bollinger_lower":  quote.Analytics.BollingerLower,
-		"market_sentiment": quote.Analytics.MarketSentiment,
-		"sentiment_score":  quote.Analytics.SentimentScore,
-		"signals":          quote.Analytics.Signals,
+		"symbol":                quote.Symbol,
+		"market":                quote.Market,
+		"timestamp":             quote.Timestamp,
+		"buy_volume_1m":         quote.Analytics.BuyVolume1m,
+		"sell_volume_1m":        quote.Analytics.SellVolume1m,
+		"buy_volume_5m":         quote.Analytics.BuyVolume5m,  // <--- ДОБАВЛЕНО
+		"sell_volume_5m":        quote.Analytics.SellVolume5m, // <--- ДОБАВЛЕНО
+		"buy_sell_ratio":        quote.Analytics.BuySellRatio,
+		"rsi_14":                quote.Analytics.RSI14,
+		"ema_12":                quote.Analytics.EMA12,
+		"ema_26":                quote.Analytics.EMA26,
+		"macd":                  quote.Analytics.MACD,
+		"macd_signal":           quote.Analytics.MACDSignal,
+		"bollinger_upper":       quote.Analytics.BollingerUpper,
+		"bollinger_middle":      quote.Analytics.BollingerMiddle,
+		"bollinger_lower":       quote.Analytics.BollingerLower,
+		"market_sentiment":      quote.Analytics.MarketSentiment,
+		"sentiment_score":       quote.Analytics.SentimentScore,
+		"signals":               quote.Analytics.Signals,
+		"bid_pressure":          quote.Analytics.BidPressure,         // <--- ДОБАВЛЕНО
+		"ask_pressure":          quote.Analytics.AskPressure,         // <--- ДОБАВЛЕНО
+		"spread_percent":        quote.Analytics.SpreadPercent,       // <--- ДОБАВЛЕНО
+		"long_liquidations_1m":  quote.Analytics.LongLiquidations1m,  // <--- ДОБАВЛЕНО
+		"short_liquidations_1m": quote.Analytics.ShortLiquidations1m, // <--- ДОБАВЛЕНО
+		"liquidation_ratio":     quote.Analytics.LiquidationRatio,    // <--- ДОБАВЛЕНО
+		"price_velocity":        quote.Analytics.PriceVelocity,       // <--- ДОБАВЛЕНО
+		"volume_velocity":       quote.Analytics.VolumeVelocity,      // <--- ДОБАВЛЕНО
+		"momentum_5m":           quote.Analytics.Momentum5m,          // <--- ДОБАВЛЕНО
 	}
 
 	subject := fmt.Sprintf("analytics.%s.%s",

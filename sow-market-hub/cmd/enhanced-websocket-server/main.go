@@ -24,19 +24,21 @@ type EnhancedWebSocketServer struct {
 }
 
 type EnhancedClient struct {
-	conn             *websocket.Conn
-	subscriptions    map[string]bool // topic -> subscribed
-	subscriptionsMux sync.RWMutex
-	writeMux         sync.Mutex
+	conn *websocket.Conn
+
+	// Мьютекс для записи в WebSocket соединение
+	writeMux sync.Mutex
 
 	// Фильтры клиента
-	symbols   map[string]bool
-	markets   map[string]bool
-	dataTypes map[string]bool // quotes, trades, orderbook, klines, analytics
+	symbols    map[string]bool
+	markets    map[string]bool
+	dataTypes  map[string]bool
+	filtersMux sync.RWMutex // Мьютекс для доступа к maps: symbols, markets, dataTypes
 
-	// Настройки
-	throttle time.Duration
-	lastSent map[string]time.Time
+	// Настройки throttle
+	throttle    time.Duration
+	lastSent    map[string]time.Time
+	lastSentMux sync.Mutex // Мьютекс для доступа к lastSent
 }
 
 type ClientMessage struct {
@@ -91,13 +93,12 @@ func (ews *EnhancedWebSocketServer) handleWebSocket(w http.ResponseWriter, r *ht
 
 	// Создаем расширенного клиента
 	client := &EnhancedClient{
-		conn:          conn,
-		subscriptions: make(map[string]bool),
-		symbols:       make(map[string]bool),
-		markets:       make(map[string]bool),
-		dataTypes:     make(map[string]bool),
-		throttle:      100 * time.Millisecond, // Дефолтный throttle
-		lastSent:      make(map[string]time.Time),
+		conn:      conn,
+		symbols:   make(map[string]bool),
+		markets:   make(map[string]bool),
+		dataTypes: make(map[string]bool),
+		throttle:  100 * time.Millisecond, // Дефолтный throttle
+		lastSent:  make(map[string]time.Time),
 	}
 
 	// Добавляем клиента
@@ -164,35 +165,32 @@ func (ews *EnhancedWebSocketServer) handleClientMessage(client *EnhancedClient, 
 }
 
 func (ews *EnhancedWebSocketServer) handleSubscribe(client *EnhancedClient, msg ClientMessage) {
+	client.filtersMux.Lock() // Защищаем доступ к фильтрам
+	defer client.filtersMux.Unlock()
+
 	// Парсим фильтры
 	if symbols, ok := msg.Filters["symbols"].([]interface{}); ok {
-		client.subscriptionsMux.Lock()
 		for _, sym := range symbols {
 			if symbol, ok := sym.(string); ok {
 				client.symbols[strings.ToUpper(symbol)] = true
 			}
 		}
-		client.subscriptionsMux.Unlock()
 	}
 
 	if markets, ok := msg.Filters["markets"].([]interface{}); ok {
-		client.subscriptionsMux.Lock()
 		for _, mkt := range markets {
 			if market, ok := mkt.(string); ok {
 				client.markets[strings.ToUpper(market)] = true
 			}
 		}
-		client.subscriptionsMux.Unlock()
 	}
 
 	if dataTypes, ok := msg.Filters["data_types"].([]interface{}); ok {
-		client.subscriptionsMux.Lock()
 		for _, dt := range dataTypes {
 			if dataType, ok := dt.(string); ok {
 				client.dataTypes[strings.ToLower(dataType)] = true
 			}
 		}
-		client.subscriptionsMux.Unlock()
 	}
 
 	// Создаем NATS подписки
@@ -215,15 +213,16 @@ func (ews *EnhancedWebSocketServer) handleSubscribe(client *EnhancedClient, msg 
 }
 
 func (ews *EnhancedWebSocketServer) handleUnsubscribe(client *EnhancedClient, msg ClientMessage) {
+	client.filtersMux.Lock() // Защищаем доступ к фильтрам
+	defer client.filtersMux.Unlock()
+
 	// Реализация отписки
 	if symbols, ok := msg.Filters["symbols"].([]interface{}); ok {
-		client.subscriptionsMux.Lock()
 		for _, sym := range symbols {
 			if symbol, ok := sym.(string); ok {
 				delete(client.symbols, strings.ToUpper(symbol))
 			}
 		}
-		client.subscriptionsMux.Unlock()
 	}
 
 	// Отправляем подтверждение
@@ -239,6 +238,9 @@ func (ews *EnhancedWebSocketServer) handleUnsubscribe(client *EnhancedClient, ms
 }
 
 func (ews *EnhancedWebSocketServer) handleConfigure(client *EnhancedClient, msg ClientMessage) {
+	client.filtersMux.Lock() // Защищаем доступ к фильтрам
+	defer client.filtersMux.Unlock()
+
 	// Настройка throttle
 	if throttleMs, ok := msg.Filters["throttle_ms"].(float64); ok {
 		client.throttle = time.Duration(throttleMs) * time.Millisecond
@@ -258,8 +260,10 @@ func (ews *EnhancedWebSocketServer) handleConfigure(client *EnhancedClient, msg 
 }
 
 func (ews *EnhancedWebSocketServer) ensureNATSSubscriptions(client *EnhancedClient) {
-	// Подписываемся на все необходимые NATS топики
+	client.filtersMux.RLock() // Читаем фильтры клиента
+	defer client.filtersMux.RUnlock()
 
+	// Подписываемся на все необходимые NATS топики
 	for dataType := range client.dataTypes {
 		for symbol := range client.symbols {
 			for market := range client.markets {
@@ -268,7 +272,7 @@ func (ews *EnhancedWebSocketServer) ensureNATSSubscriptions(client *EnhancedClie
 					strings.ToLower(market),
 					strings.ToLower(symbol))
 
-				ews.subscriptionsMux.Lock()
+				ews.subscriptionsMux.Lock() // Защищаем map ews.subscriptions
 				if _, exists := ews.subscriptions[subject]; !exists {
 					sub, err := ews.natsConn.Subscribe(subject, func(m *nats.Msg) {
 						ews.handleNATSMessage(m, dataType, symbol, market)
@@ -320,15 +324,23 @@ func (ews *EnhancedWebSocketServer) broadcastToInterestedClients(message ServerM
 	var wg sync.WaitGroup
 	for _, client := range clients {
 		// Проверяем интерес клиента
-		if !ews.isClientInterested(client, message) {
+		client.filtersMux.RLock() // Защищаем чтение фильтров
+		interested := ews.isClientInterested(client, message)
+		client.filtersMux.RUnlock()
+
+		if !interested {
 			continue
 		}
 
 		// Проверяем throttle
 		key := fmt.Sprintf("%s_%s_%s", message.Symbol, message.Market, message.DataType)
+
+		client.lastSentMux.Lock() // Защищаем lastSent при чтении
 		if time.Since(client.lastSent[key]) < client.throttle {
+			client.lastSentMux.Unlock()
 			continue
 		}
+		client.lastSentMux.Unlock()
 
 		wg.Add(1)
 		go func(c *EnhancedClient) {
@@ -345,7 +357,9 @@ func (ews *EnhancedWebSocketServer) broadcastToInterestedClients(message ServerM
 				ews.clientsMux.Unlock()
 				c.conn.Close()
 			} else {
+				c.lastSentMux.Lock() // Защищаем lastSent при записи
 				c.lastSent[key] = time.Now()
+				c.lastSentMux.Unlock()
 			}
 		}(client)
 	}
@@ -353,8 +367,8 @@ func (ews *EnhancedWebSocketServer) broadcastToInterestedClients(message ServerM
 }
 
 func (ews *EnhancedWebSocketServer) isClientInterested(client *EnhancedClient, message ServerMessage) bool {
-	client.subscriptionsMux.RLock()
-	defer client.subscriptionsMux.RUnlock()
+	// client.filtersMux.RLock() // <--- ЭТОТ RLock НЕ НУЖЕН ЗДЕСЬ, ОН УЖЕ ВЫШЕ
+	// defer client.filtersMux.RUnlock()
 
 	// Проверяем символ
 	if len(client.symbols) > 0 && !client.symbols[strings.ToUpper(message.Symbol)] {

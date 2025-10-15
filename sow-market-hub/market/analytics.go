@@ -1,6 +1,7 @@
 package market
 
 import (
+	"log" // <-- ДОБАВЛЕНО
 	"math"
 	"sync"
 	"time"
@@ -135,6 +136,7 @@ func (ra *RealTimeAnalytics) UpdateData(key string, data *EnhancedMarketData) {
 			VolumeProfile:  NewVolumeProfileIndicator(),
 			OrderFlowDelta: NewOrderFlowDeltaIndicator(),
 		}
+		log.Printf("DEBUG: Analytics: Initialized indicators for %s", key) // <-- ДОБАВЛЕНО
 	}
 }
 
@@ -144,23 +146,27 @@ func (ra *RealTimeAnalytics) CalculateMetrics(key string) *AnalyticsMetrics {
 
 	data := ra.data[key]
 	if data == nil {
+		log.Printf("DEBUG: Analytics: No market data for key %s", key) // <-- ДОБАВЛЕНО
 		return nil
 	}
 
 	indicators := ra.indicators[key]
 	if indicators == nil {
+		log.Printf("DEBUG: Analytics: No indicators initialized for key %s", key) // <-- ДОБАВЛЕНО
 		return nil
 	}
 
 	priceHistory := ra.priceHistory[key]
 	if len(priceHistory) < 14 {
-		return nil // Недостаточно данных
+		log.Printf("DEBUG: Analytics: Not enough price history (%d) for key %s to calculate RSI (min 14).", len(priceHistory), key) // <-- ДОБАВЛЕНО
+		return nil                                                                                                                  // Недостаточно данных
 	}
 
 	metrics := &AnalyticsMetrics{}
 
 	// 1. Обновляем технические индикаторы
 	ra.updateTechnicalIndicators(key, data.Price)
+	log.Printf("DEBUG: Analytics: Updated technical indicators for %s. Price: %.2f, RSI: %.2f", key, data.Price, indicators.RSI.GetValue()) // <-- ДОБАВЛЕНО
 
 	// 2. Анализ объемов торгов
 	metrics.BuyVolume1m, metrics.SellVolume1m = ra.calculateVolumeByDirection(data, 1*time.Minute)
@@ -168,6 +174,10 @@ func (ra *RealTimeAnalytics) CalculateMetrics(key string) *AnalyticsMetrics {
 
 	if metrics.SellVolume1m > 0 {
 		metrics.BuySellRatio = metrics.BuyVolume1m / metrics.SellVolume1m
+	} else if metrics.BuyVolume1m > 0 { // Если продаж нет, а покупки есть
+		metrics.BuySellRatio = 9999.0 // Очень большое число
+	} else {
+		metrics.BuySellRatio = 1.0 // Нейтрально, если нет ни покупок, ни продаж
 	}
 
 	// 3. Анализ стакана заявок
@@ -177,6 +187,10 @@ func (ra *RealTimeAnalytics) CalculateMetrics(key string) *AnalyticsMetrics {
 	metrics.LongLiquidations1m, metrics.ShortLiquidations1m = ra.calculateLiquidations(data, 1*time.Minute)
 	if metrics.ShortLiquidations1m > 0 {
 		metrics.LiquidationRatio = metrics.LongLiquidations1m / metrics.ShortLiquidations1m
+	} else if metrics.LongLiquidations1m > 0 { // Если коротких ликвидаций нет, а длинные есть
+		metrics.LiquidationRatio = 9999.0
+	} else {
+		metrics.LiquidationRatio = 1.0
 	}
 
 	// 5. Технические индикаторы

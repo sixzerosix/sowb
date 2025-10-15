@@ -2,6 +2,9 @@ package main
 
 import (
 	"log"
+	"os"
+	"os/signal"
+	"syscall"
 	"sow-market-hub/market" // Убедись, что путь правильный
 )
 
@@ -51,9 +54,19 @@ func main() {
 	// -------------------------------------------------------------
 
 	// --- И ЗАПУСТИ ЕГО ---
-	if err := listener.Start(); err != nil {
-		log.Fatalf("Критическая ошибка: %v", err)
-	}
-	select {}
+	go func() {
+		if err := listener.Start(); err != nil {
+			log.Fatalf("Критическая ошибка: %v", err)
+		}
+	}()
+
+	// Ожидаем сигналов прерывания и корректно останавливаем listener
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
+	<-stop
+
+	log.Println("📡 Shutdown signal received, stopping listener...")
+	listener.Stop()
+	log.Println("✅ Listener stopped, exiting.")
 
 }

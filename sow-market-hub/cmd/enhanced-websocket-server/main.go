@@ -71,7 +71,7 @@ func NewEnhancedWebSocketServer(natsURL string) (*EnhancedWebSocketServer, error
 		return nil, fmt.Errorf("ошибка подключения к NATS: %w", err)
 	}
 
-	return &EnhancedWebSocketServer{
+	ews := &EnhancedWebSocketServer{
 		clients:       make(map[*websocket.Conn]*EnhancedClient),
 		natsConn:      nc,
 		subscriptions: make(map[string]*nats.Subscription),
@@ -80,7 +80,68 @@ func NewEnhancedWebSocketServer(natsURL string) (*EnhancedWebSocketServer, error
 				return true
 			},
 		},
-	}, nil
+	}
+
+	// Auto-subscribe to common publisher patterns so server receives messages even before clients
+	ews.autoSubscribeDefaults()
+
+	return ews, nil
+}
+
+// autoSubscribeDefaults subscribes to wildcard patterns used by the publisher
+func (ews *EnhancedWebSocketServer) autoSubscribeDefaults() {
+	patterns := []string{
+		"quotes.*.*",
+		"trades.*.*",
+		"orderbook.*.*",
+		"klines.*.*.*",
+		"analytics.*.*",
+	}
+
+	for _, pat := range patterns {
+		ews.subscriptionsMux.Lock()
+		if _, exists := ews.subscriptions[pat]; exists {
+			ews.subscriptionsMux.Unlock()
+			continue
+		}
+
+		sub, err := ews.natsConn.Subscribe(pat, func(m *nats.Msg) {
+			parts := strings.Split(m.Subject, ".")
+			if len(parts) < 3 {
+				log.Printf("⚠️ Unexpected subject format: %s", m.Subject)
+				return
+			}
+
+			var dataType, market, symbol string
+			if parts[0] == "klines" {
+				// klines.interval.market.symbol
+				if len(parts) >= 4 {
+					dataType = "klines"
+					market = parts[2]
+					symbol = parts[3]
+				} else {
+					log.Printf("⚠️ Unexpected klines subject: %s", m.Subject)
+					return
+				}
+			} else {
+				dataType = parts[0]
+				market = parts[1]
+				symbol = parts[2]
+			}
+
+			ews.handleNATSMessage(m, dataType, symbol, market)
+		})
+
+		if err != nil {
+			log.Printf("❌ Error auto-subscribing to %s: %v", pat, err)
+			ews.subscriptionsMux.Unlock()
+			continue
+		}
+
+		ews.subscriptions[pat] = sub
+		ews.subscriptionsMux.Unlock()
+		log.Printf("📡 Auto-subscribed to NATS pattern: %s", pat)
+	}
 }
 
 func (ews *EnhancedWebSocketServer) handleWebSocket(w http.ResponseWriter, r *http.Request) {

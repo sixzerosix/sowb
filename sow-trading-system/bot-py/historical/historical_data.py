@@ -122,8 +122,8 @@ async def save_historical_data(
 async def main():
     symbols = ["BTC/USDT"]
     timeframes = ["1m"]
-    start_date = "2017-01-01 00:00:00"  # YYYY-MM-DD 00:00:00
-    end_date = "2017-02-01 00:00:00"
+    start_date = "2025-07-01 00:00:00"  # YYYY-MM-DD 00:00:00
+    end_date = "2025-09-01 00:00:00"
     output_directory = "data/historical"
 
     # Ограничение одновременных задач

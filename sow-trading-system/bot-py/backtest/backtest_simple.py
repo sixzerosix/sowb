@@ -5,7 +5,10 @@ import matplotlib.pyplot as plt
 
 # Определяем путь к файлу
 script_dir = os.path.dirname(os.path.abspath(__file__))
-file_path = os.path.join(script_dir, "BTC_USDT_1m_2024-11-01 00_00_00_to_current.csv")
+file_path = os.path.join(
+    script_dir,
+    "BTC_USDT_1m_2025-07-01_00_00_00_to_2025-09-01_00_00_00.csv",
+)
 
 # Проверяем, существует ли файл
 if not os.path.exists(file_path):

@@ -174,5 +174,6 @@ cython_debug/
 .pypirc
 
 # Datas
-/data/backtests/*
-/data/historical/*
+data/backtests/*
+data/historical/*
+*/**/*.csv

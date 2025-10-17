@@ -14,7 +14,7 @@ from math import copysign
 script_dir = os.path.dirname(os.path.abspath(__file__))
 file_path = os.path.join(
     script_dir,
-    "BTC_USDT_1m_2025-07-01_00_00_00_to_2025-09-01_00_00_00.csv",
+    "BTC_USDT_1m_2023-08-01 00_00_00_to_2025-08-01_00_00_00.csv",
 )
 
 if not os.path.exists(file_path):

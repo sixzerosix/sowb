@@ -26,7 +26,7 @@ STRATEGY_CONFIG_HFT_SCALPER = StrategyConfig(
             "levels": np.array([0.236, 0.786], dtype=np.float64)
         },  # Более крайние уровни фибо
         "RSI": {"rsi_len": 5},  # Чрезвычайно быстрый RSI
-        "MACD": {"fast_p": 8, "slow_p": 16, "signal_p": 5},
+        "MACD": {"fast_len": 12, "slow_len": 26, "signal_len": 9},
         "BOLLINGER_BANDS": {
             "period": 20,
             "dev_up": 1.8,
@@ -62,7 +62,7 @@ STRATEGY_CONFIG_BREAKOUT_SCALPER = StrategyConfig(
         "RSI": {
             "rsi_len": 14
         },  # Стандартный RSI для подтверждения перекупленности/перепроданности перед пробоем
-        "MACD": {"fast_p": 12, "slow_p": 26, "signal_p": 9},
+        "MACD": {"fast_len": 12, "slow_len": 26, "signal_len": 9},
         "BOLLINGER_BANDS": {
             "period": 20,
             "dev_up": 3.0,
@@ -86,7 +86,7 @@ STRATEGY_CONFIG_MR_SCALPER = StrategyConfig(
         "HTF_FILTER": {"period": "30min", "ema_fast_len": 12, "ema_slow_len": 26},
         "FIBO": {"levels": np.array([0.382, 0.618], dtype=np.float64)},
         "RSI": {"rsi_len": 10},  # Средняя скорость RSI
-        "MACD": {"fast_p": 12, "slow_p": 26, "signal_p": 9},
+        "MACD": {"fast_len": 12, "slow_len": 26, "signal_len": 9},
         "BOLLINGER_BANDS": {
             "period": 30,
             "dev_up": 2.0,

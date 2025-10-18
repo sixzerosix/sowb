@@ -1,12 +1,14 @@
 import time
 import pandas as pd
 import numpy as np
-import itertools
-import copy
+
+# Удалены itertools и copy, так как Optuna будет определять параметры
 from typing import Tuple, Dict, Any, List, Generator
 from numba import jit
+import optuna  # <-- НОВЫЙ ИМПОРТ
 
 # Импорт модулей
+# Примечание: предполагается, что эти модули содержат необходимые классы и функции
 from backtest.core.config import StrategyConfig, PersistenceConfig, FILE_PATH
 from backtest.core.data_loader import load_data
 from backtest.core.indicators import calculate_strategy_indicators
@@ -19,6 +21,7 @@ from backtest.core.persistence import (
     SCRIPT_DIR,
 )
 
+# Эти конфигурации больше не нужны для оптимизации, но оставлены для режима SINGLE
 from backtest.core.strategy_configs import (
     STRATEGY_CONFIG_MR_SCALPER,
     STRATEGY_CONFIG_BREAKOUT_SCALPER,
@@ -32,20 +35,22 @@ from backtest.core.strategy_configs import (
 # --- ПЕРЕКЛЮЧАТЕЛЬ РЕЖИМА ---
 # Установите:
 # - "SINGLE" для запуска одной стратегии
-# - "OPTIMIZE" для запуска цикла оптимизации
+# - "OPTIMIZE" для запуска цикла оптимизации Optuna
 RUN_MODE = "OPTIMIZE"
 
 # Какую стратегию запускать в режиме "SINGLE" (используйте вашу конфигурацию из config.py)
 TARGET_CONFIG_NAME = "MR_SCALPER"
 
 
-# --- ПРОСТРАНСТВО ПАРАМЕТРОВ ДЛЯ ОПТИМИЗАЦИИ ---
-# Перебираемые параметры должны быть в виде списка.
-PARAMETER_SPACE: Dict[str, Dict[str, List[Any]]] = {
-    "EMA_TREND": {"fast_len": [5, 7], "slow_len": [21, 34]},
-    "RSI": {"rsi_len": [10, 14], "oversold": [30]},
-    "ATR_EXIT": {"atr_len": [10, 14]},  # Добавляем ATR в оптимизацию
-    "HTF_FILTER": {"period": ["30min", "1H"]},  # Оптимизация периода HTF
+# --- ПРОСТРАНСТВО ПАРАМЕТРОВ ДЛЯ ОПТИМИЗАЦИИ OPTUNA ---
+# Здесь мы задаем широкие диапазоны, которые Optuna будет исследовать.
+# Мы не используем этот словарь напрямую, но он служит справочником.
+PARAMETER_SEARCH_RANGES: Dict[str, Dict[str, List[Any]]] = {
+    # [min, max, step] или [choice1, choice2, ...]
+    "EMA_TREND": {"fast_len": [5, 20], "slow_len": [30, 60]},
+    "RSI": {"rsi_len": [7, 25], "oversold": [20, 40]},
+    "ATR_EXIT": {"atr_len": [10, 30]},
+    "HTF_FILTER": {"period": ["15min", "30min", "1H", "2H"]},
 }
 
 
@@ -62,13 +67,11 @@ def numba_backtest_core(
     ema_slow: np.ndarray,
     rsi_val: np.ndarray,
     atr_val: np.ndarray,  # ATR для динамического SL/TP
-    # macd_hist: np.ndarray, # Удалено
     oversold: float,
     overbought: float,
     target_roi_percent: float,
     risk_roi_percent: float,
     leverage: float,
-    # htf_trend_up: np.ndarray, # Удалено
     macd_filter_pass_array: np.ndarray,  # (dtype=np.bool_)
     htf_filter_pass_array: np.ndarray,  # (dtype=np.bool_)
 ) -> Tuple[np.ndarray, float]:
@@ -106,7 +109,6 @@ def numba_backtest_core(
         is_overbought_signal = rsi_val[i] > overbought
 
         # Фильтры теперь передаются как готовые булевы массивы
-        # Мы читаем их здесь, чтобы 'htf_filter_pass' был доступен для логики выхода
         macd_filter_pass = macd_filter_pass_array[i]
         htf_filter_pass = htf_filter_pass_array[i]
 
@@ -128,9 +130,7 @@ def numba_backtest_core(
                 exit_price = stop_loss_price
                 exit_reason = 2
 
-            # Check Trend Reversal (EMA Cross Down OR Overbought RSI)
-            # Добавим условие: если HTF тренд стал нисходящим, тоже закрываем
-            # Эта строка теперь будет работать корректно
+            # Check Trend Reversal (EMA Cross Down OR Overbought RSI OR HTF Reversal)
             elif ema_cross_down or is_overbought_signal or not htf_filter_pass:
                 exit_price = current_close
                 exit_reason = 3
@@ -166,12 +166,11 @@ def numba_backtest_core(
 
             # Полный сигнал входа LONG
             # (EMA-кросс UP) AND (RSI - перепроданность) AND (HTF - UP) AND (MACD - UP)
-            # Эта строка также будет работать корректно
             entry_signal = (
                 ema_cross_up
                 and is_oversold_signal
                 and htf_filter_pass
-                # and macd_filter_pass # <-- ВРЕМЕННО ОТКЛЮЧИ ЭТО ДЛЯ ТЕСТА
+                # macd_filter_pass # <-- ВРЕМЕННО ОТКЛЮЧЕНО в исходном коде
             )
 
             if entry_signal:
@@ -184,7 +183,6 @@ def numba_backtest_core(
                     atr_distance = atr_val[i]  # Берем ATR на текущей свече
 
                     # target_roi_percent и risk_roi_percent теперь множители ATR
-                    # (хотя могут быть и множителями цены, для простоты берем ATR)
                     target_move_in_price = atr_distance * target_roi_percent
                     risk_move_in_price = atr_distance * risk_roi_percent
 
@@ -232,13 +230,13 @@ def run_backtest(
     df_with_indicators = calculate_strategy_indicators(df, config)
 
     if len(df_with_indicators) < 100:
-        print(
-            "--- WARNING: Недостаточно данных после расчета индикаторов. Пропускаем прогон."
-        )
+        # print(
+        #     "--- WARNING: Недостаточно данных после расчета индикаторов. Пропускаем прогон."
+        # )
         return (
             {
                 "Total Trades": 0,
-                "Total PnL": 0.0,
+                "Total PnL": -1000.0,  # Отрицательное PnL для Optuna, чтобы избежать выбора недействительных прогонов
                 "Final Equity": initial_capital,
                 "Return (%)": 0.0,
             },
@@ -266,60 +264,58 @@ def run_backtest(
     risk_roi_percent = config.risk_roi_percent
 
     # --- 2b. ПОДГОТОВКА ФИЛЬТРОВ (ДИНАМИЧЕСКИ) ---
-    # Это решает твою проблему: фильтры активны, только если индикатор есть в конфиге.
 
     # Фильтр MACD: Активен, только если MACD есть в конфиге
     if "MACD" in config.indicator_set:
         if "macd_hist" in df_with_indicators.columns:
             macd_filter_pass_array = df_with_indicators["macd_hist"].values > 0.0
-            print("--- DEBUG: Фильтр MACD (Hist > 0) АКТИВИРОВАН.")
+            if not is_optimization:
+                print("--- DEBUG: Фильтр MACD (Hist > 0) АКТИВИРОВАН.")
         else:
-            print(
-                "--- WARNING: MACD в конфиге, но колонка 'macd_hist' не найдена. Фильтр MACD отключен."
-            )
+            if not is_optimization:
+                print(
+                    "--- WARNING: MACD в конфиге, но колонка 'macd_hist' не найдена. Фильтр MACD отключен."
+                )
             macd_filter_pass_array = np.full(len(closes), True, dtype=np.bool_)
     else:
         # Если MACD нет в конфиге, фильтр всегда True (пропускает)
-        print("--- DEBUG: MACD не в конфиге. Фильтр MACD (логика) отключен.")
+        if not is_optimization:
+            print("--- DEBUG: MACD не в конфиге. Фильтр MACD (логика) отключен.")
         macd_filter_pass_array = np.full(len(closes), True, dtype=np.bool_)
 
     # Фильтр HTF: Активен, только если HTF_FILTER есть в конфиге
     if "HTF_FILTER" in config.indicator_set:
         if "htf_trend_up" in df_with_indicators.columns:
             htf_filter_pass_array = df_with_indicators["htf_trend_up"].values
-            print("--- DEBUG: Фильтр HTF (Trend UP) АКТИВИРОВАН.")
+            if not is_optimization:
+                print("--- DEBUG: Фильтр HTF (Trend UP) АКТИВИРОВАН.")
         else:
-            print(
-                "--- WARNING: HTF_FILTER в конфиге, но 'htf_trend_up' не найдена. Фильтр HTF отключен."
-            )
+            if not is_optimization:
+                print(
+                    "--- WARNING: HTF_FILTER в конфиге, но 'htf_trend_up' не найдена. Фильтр HTF отключен."
+                )
             htf_filter_pass_array = np.full(len(closes), True, dtype=np.bool_)
     else:
         # Если HTF_FILTER нет в конфиге, фильтр всегда True (пропускает)
-        print("--- DEBUG: HTF_FILTER не в конфиге. Фильтр HTF (логика) отключен.")
+        if not is_optimization:
+            print("--- DEBUG: HTF_FILTER не в конфиге. Фильтр HTF (логика) отключен.")
         htf_filter_pass_array = np.full(len(closes), True, dtype=np.bool_)
 
     # --- 3. ВЫЗОВ NUMBA-КОМПИЛИРОВАННОГО ЯДРА ---
-    # Мы больше не передаем 'macd_hist' и 'htf_trend_up'.
-    # Вместо них передаем готовые булевы массивы 'macd_filter_pass_array' и 'htf_filter_pass_array'.
-
     trades_array, final_equity = numba_backtest_core(
         closes,
         ema_fast,
         ema_slow,
         rsi_val,
         atr_val,
-        # macd_hist, # Удалено
         oversold,
         overbought,
         target_roi_percent,
         risk_roi_percent,
         config.leverage,
-        # htf_trend_up_array, # Удалено
         macd_filter_pass_array,  # Новый параметр
         htf_filter_pass_array,  # Новый параметр
     )
-
-    # (Остальная часть run_backtest остается прежней)
 
     # --- 4. ПРЕОБРАЗОВАНИЕ РЕЗУЛЬТАТОВ ОБРАТНО В DATAFRAME ---
     trades_df = pd.DataFrame(
@@ -335,10 +331,12 @@ def run_backtest(
     )
 
     if trades_df.empty:
-        print("--- WARNING: В данном прогоне сделки не совершались.")
+        # В режиме оптимизации не выводим предупреждения, чтобы не загромождать консоль
+        if not is_optimization:
+            print("--- WARNING: В данном прогоне сделки не совершались.")
         metrics = {
             "Total Trades": 0,
-            "Total PnL": 0.0,
+            "Total PnL": -1000.0,  # Отрицательное PnL для Optuna
             "Final Equity": final_equity,
             "Return (%)": 0.0,
         }
@@ -365,135 +363,159 @@ def run_backtest(
     )
 
     # В режиме оптимизации возвращаем только ключевые метрики для ранжирования
-    if is_optimization:
-        return metrics, trades_df, df_with_indicators
-
+    # Оставляем полную логику возврата, но Optuna будет использовать только 'Total PnL'
     return metrics, trades_df, df_with_indicators
 
 
-def calculate_trade_pnl(
-    entry_price: float,
-    exit_price: float,
-    position_size: float,
-    current_capital: float,
-    side: str,
-) -> Tuple[float, float, float]:
+# =========================================================================
+# === МОДУЛЬ 5: OPTUNA ОПТИМИЗАЦИЯ ===
+# =========================================================================
+
+
+def objective(
+    trial: optuna.Trial, data: pd.DataFrame, base_config: StrategyConfig
+) -> float:
     """
-    Расчет PnL (в USD) и ROI (в %) для одной сделки.
+    Целевая функция Optuna: определяет пространство поиска и запускает бэктест.
     """
 
-    if side == "LONG":
-        pnl_percent = (exit_price - entry_price) / entry_price
-    elif side == "SHORT":
-        pnl_percent = (entry_price - exit_price) / exit_price
-    else:
-        raise ValueError("Неверное направление сделки (side).")
+    # 1. Определение пространства поиска параметров с помощью Optuna Trial
 
-    pnl_value = current_capital * pnl_percent * (position_size / current_capital)
-    roi_percent = (pnl_value / current_capital) * 100
+    # EMA Trend
+    fast_len = trial.suggest_int("ema_fast", 5, 20)
+    slow_len = trial.suggest_int("ema_slow", 30, 60)
 
-    final_equity = current_capital + pnl_value
+    # RSI
+    rsi_len = trial.suggest_int("rsi_len", 7, 25)
+    oversold = trial.suggest_int("oversold", 20, 40)
 
-    return pnl_value, roi_percent, final_equity
+    # ATR Exit
+    atr_len = trial.suggest_int("atr_len", 10, 30)
+
+    # HTF Filter
+    htf_period = trial.suggest_categorical("htf_period", ["15min", "30min", "1H", "2H"])
+
+    # Убедимся, что fast_len < slow_len
+    if fast_len >= slow_len:
+        # Использование Trial Pruning для отбрасывания нелогичных комбинаций
+        raise optuna.exceptions.TrialPruned()
+
+    # 2. Создание новой StrategyConfig
+    # Копируем базовую конфигурацию, чтобы сохранить параметры, не участвующие в оптимизации
+    # Используем deepcopy, чтобы избежать изменения глобальной STRATEGY_CONFIG
+    new_config = StrategyConfig(
+        initial_capital=base_config.initial_capital,
+        leverage=base_config.leverage,
+        target_roi_percent=base_config.target_roi_percent,
+        risk_roi_percent=base_config.risk_roi_percent,
+        indicator_set={
+            # Переопределяем или создаем наборы индикаторов
+            "EMA_TREND": {"fast_len": fast_len, "slow_len": slow_len},
+            "RSI": {
+                "rsi_len": rsi_len,
+                "overbought": 70.0,
+                "oversold": float(oversold),
+            },
+            "ATR_EXIT": {"atr_len": atr_len},
+            "HTF_FILTER": {"period": htf_period, "ema_len": 20},
+            # Добавляем остальные индикаторы из базы, если они есть (MACD, SWING_STRUCT и т.д.)
+            # Здесь предполагаем, что если MACD не оптимизируется, мы берем его из базы
+            **{
+                k: v
+                for k, v in base_config.indicator_set.items()
+                if k not in ["EMA_TREND", "RSI", "ATR_EXIT", "HTF_FILTER"]
+            },
+        },
+    )
+
+    # 3. Сохранение параметров в атрибутах Trial (для последующего извлечения лучшей конфигурации)
+    # Нам нужно сохранить всю конфигурацию
+    trial.set_user_attr("optimized_config_params", new_config.indicator_set)
+
+    # 4. Запуск бэктеста
+    metrics, _, _ = run_backtest(data, new_config, is_optimization=True)
+
+    # 5. Возвращаем целевую метрику (например, Total PnL)
+    return metrics.get("Total PnL", -np.inf)
 
 
-def generate_configs(
-    parameter_space: Dict[str, Dict[str, List[Any]]], base_config: StrategyConfig
-) -> Generator[StrategyConfig, None, None]:
-    """Генератор, создающий комбинации StrategyConfig из пространства параметров."""
-
-    all_params = []
-    indicator_names = []
-
-    for indicator_name, params in parameter_space.items():
-        indicator_names.append(indicator_name)
-        keys = list(params.keys())
-        values = list(params.values())
-
-        param_combinations = list(itertools.product(*values))
-
-        indicator_param_sets = [dict(zip(keys, combo)) for combo in param_combinations]
-        all_params.append(indicator_param_sets)
-
-    for combo_of_indicator_sets in itertools.product(*all_params):
-        new_config = copy.deepcopy(base_config)
-
-        final_indicator_set = copy.deepcopy(base_config.indicator_set)
-        for i, indicator_set in enumerate(combo_of_indicator_sets):
-
-            # Объединяем параметры оптимизации с базовыми параметрами индикатора
-            current_indicator_name = indicator_names[i]
-            base_params = final_indicator_set.get(current_indicator_name, {})
-            # Обновляем базовые параметры параметрами из оптимизации
-            base_params.update(indicator_set)
-            final_indicator_set[current_indicator_name] = base_params
-
-        new_config.indicator_set = final_indicator_set
-        yield new_config
-
-
-def run_optimization(
+def run_optuna_optimization(
     data: pd.DataFrame,
-    parameter_space: Dict[str, Dict[str, List[Any]]],
     base_config: StrategyConfig,
     persistence_config: PersistenceConfig,
+    n_trials: int = 100,  # Количество прогонов Optuna
 ) -> Tuple[StrategyConfig | None, Dict[str, Any] | None, float]:
-    """Запускает цикл оптимизации параметров стратегии."""
+    """Запускает цикл оптимизации параметров стратегии с использованием Optuna."""
 
     start_time = time.time()
-    best_total_pnl = -np.inf
-    best_config = None
-    best_metrics = None
 
-    print("\n--- НАЧАЛО ОПТИМИЗАЦИИ ПАРАМЕТРОВ ---")
+    # 1. Создание Study (цель - максимизировать Total PnL)
+    study = optuna.create_study(
+        direction="maximize",
+        study_name="Backtest_Strategy_Optimization",
+    )
 
-    for run_num, current_config in enumerate(
-        generate_configs(parameter_space, base_config), 1
-    ):
-        print(f"\n[RUN {run_num}] Тестирование: {current_config.indicator_set}")
+    # 2. Запуск оптимизации
+    print(f"\n--- Optuna: Начинаем оптимизацию (N={n_trials} прогонов) ---")
 
-        metrics, trades_df, _ = run_backtest(data, current_config, is_optimization=True)
-
-        current_pnl = metrics.get("Total PnL", -np.inf)
-
-        if current_pnl > best_total_pnl:
-            best_total_pnl = current_pnl
-            best_config = current_config
-            best_metrics = metrics
-
-            print(
-                f"[RUN {run_num}] НОВЫЙ ЛУЧШИЙ РЕЗУЛЬТАТ: PnL = ${best_total_pnl:,.2f}"
-            )
+    # Optuna запускает целевую функцию n_trials раз
+    study.optimize(
+        lambda trial: objective(trial, data, base_config),
+        n_trials=n_trials,
+        # Мы не используем Pruners, но их можно добавить для ускорения.
+    )
 
     execution_time = time.time() - start_time
 
-    return best_config, best_metrics, execution_time
+    # 3. Извлечение лучшего результата
+    try:
+        best_trial = study.best_trial
+        best_metrics, _, _ = run_backtest(
+            data, base_config
+        )  # Перезапуск для получения метрик и DF
+
+        # Получаем оптимизированные параметры из атрибутов
+        best_params_dict = best_trial.user_attrs["optimized_config_params"]
+
+        # Создаем лучшую конфигурацию
+        best_config = StrategyConfig(
+            initial_capital=base_config.initial_capital,
+            leverage=base_config.leverage,
+            target_roi_percent=base_config.target_roi_percent,
+            risk_roi_percent=base_config.risk_roi_percent,
+            indicator_set=best_params_dict,
+        )
+
+        # Перезапускаем бэктест на лучшей конфигурации, чтобы получить полные метрики и trades_df
+        # Это также генерирует индикаторы для persist_optimization_result, если нужно
+        best_metrics, trades_df, _ = run_backtest(
+            data, best_config, is_optimization=False
+        )
+
+        # Добавляем PnL из лучшего прогона Optuna, так как metrics из run_backtest может быть неполным
+        if (
+            "Total PnL" not in best_metrics
+            or best_metrics["Total PnL"] < best_trial.value
+        ):
+            best_metrics["Total PnL"] = best_trial.value
+
+        print("\n--- Optuna: Лучший результат найден ---")
+        print(f"PnL: ${best_trial.value:,.2f}")
+        print(f"Параметры: {best_trial.params}")
+
+        return best_config, best_metrics, execution_time
+
+    except ValueError:
+        print("--- Optuna: Не удалось найти лучший прогон (нет успешных сделок).")
+        return None, None, execution_time
+    except Exception as e:
+        print(f"--- Optuna: Произошла ошибка при извлечении лучшего прогона: {e}")
+        return None, None, execution_time
 
 
 def main():
     # Инициализация базовых конфигураций
-    strategy_config = StrategyConfig(
-        initial_capital=1000.0,
-        leverage=20.0,
-        target_roi_percent=1.2,
-        risk_roi_percent=1.0,
-        # Базовый набор индикаторов для SINGLE-прогона
-        indicator_set={
-            "EMA_TREND": {"fast_len": 20, "slow_len": 50},
-            "RSI": {"rsi_len": 10, "overbought": 70, "oversold": 30},
-            "ATR_EXIT": {"atr_len": 20},
-            "MACD": {"fast_len": 12, "slow_len": 26, "signal_len": 9},
-            # НОВЫЕ ПОЛНОСТЬЮ РАБОЧИЕ ИНДИКАТОРЫ:
-            "SWING_STRUCT": {"window": 15},  # Окно 15 свечей для обнаружения пиков
-            "HTF_FILTER": {"period": "1H", "ema_len": 20},  # Тренд 1H EMA(20)
-            "FIBO": {"level": 0.618},  # Уровень коррекции Фибоначчи
-            # Дополнительные индикаторы (данные будут рассчитаны, но не использованы в Numba-ядре)
-            "BOLLINGER_BANDS": {"bb_len": 20, "num_dev": 2.0},
-            "STOCHASTIC": {"k_len": 14, "d_len": 3},
-            "CCI": {"cci_len": 20},
-        },
-    )
-
+    # Используем STRATEGY_CONFIG_MR_SCALPER как базовую, но Optuna будет ее переопределять.
     strategy_config = STRATEGY_CONFIG_MR_SCALPER
 
     persistence_config = PersistenceConfig(
@@ -536,38 +558,45 @@ def main():
             )
 
     elif RUN_MODE == "OPTIMIZE":
-        print(f"\n--- ЗАПУСК В РЕЖИМЕ '{RUN_MODE}' ---")
+        print(f"\n--- ЗАПУСК В РЕЖИМЕ '{RUN_MODE}' (Optuna) ---")
 
-        best_config, best_metrics, execution_time_opt = run_optimization(
-            data, PARAMETER_SPACE, strategy_config, persistence_config
-        )
+        # Optuna запускается с базовой конфигурацией,
+        # которая служит шаблоном для параметров, не участвующих в оптимизации.
+        best_config, best_metrics, execution_time_opt = run_optuna_optimization(
+            data, strategy_config, persistence_config, n_trials=50
+        )  # Установил 50 прогонов для примера
 
         if best_config and best_metrics:
-            print("\n--- ЛУЧШАЯ КОНФИГУРАЦИЯ ---")
-            print(f"PnL: ${best_metrics['Total PnL']:,.2f}")
+            print("\n--- ЛУЧШАЯ КОНФИГУРАЦИЯ (BEST OPTUNA TRIAL) ---")
+
             # Отображаем только оптимизированные параметры для примера
+            optimized_params = best_config.indicator_set
+
+            print(f"PnL: ${best_metrics['Total PnL']:,.2f}")
+            print(f"Return (%): {best_metrics.get('Return (%)', 0.0):.2f}%")
+            print(f"Max Drawdown: {best_metrics.get('Max Drawdown (%)', 0.0):.2f}%")
             print(
-                f"EMA Fast: {best_config.indicator_set.get('EMA_TREND', {}).get('fast_len', 'N/A')}"
+                f"EMA Fast: {optimized_params.get('EMA_TREND', {}).get('fast_len', 'N/A')}"
             )
             print(
-                f"HTF Period: {best_config.indicator_set.get('HTF_FILTER', {}).get('period', 'N/A')}"
+                f"EMA Slow: {optimized_params.get('EMA_TREND', {}).get('slow_len', 'N/A')}"
+            )
+            print(f"RSI Len: {optimized_params.get('RSI', {}).get('rsi_len', 'N/A')}")
+            print(
+                f"HTF Period: {optimized_params.get('HTF_FILTER', {}).get('period', 'N/A')}"
             )
 
             display_results_rich(best_metrics, pd.DataFrame(), execution_time_opt)
 
             # Сохраняем лучшую конфигурацию и ее метрики
             print("\n--- СОХРАНЕНИЕ ЛУЧШЕГО РЕЗУЛЬТАТА ---")
-            if best_config and best_metrics:
-                persist_optimization_result(
-                    best_config, best_metrics, persistence_config
-                )
-            else:
-                print(
-                    "[PERSIST] Лучшая конфигурация или метрики не найдены (скорее всего, не было сделок ни в одном прогоне)."
-                )
+            persist_optimization_result(best_config, best_metrics, persistence_config)
 
         else:
-            print("\n--- ОШИБКА ОПТИМИЗАЦИИ ---\n")
+            print("\n--- ОШИБКА ОПТИМИЗАЦИИ (Optuna) ---")
+            print(
+                "Не удалось найти лучшую конфигурацию. Все прогоны, вероятно, не смогли совершить сделки или были отброшены."
+            )
 
     else:
         print(

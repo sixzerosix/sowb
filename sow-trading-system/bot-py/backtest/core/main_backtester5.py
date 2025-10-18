@@ -406,8 +406,8 @@ def main():
     #     },
     # )
 
-    strategy_config = STRATEGY_CONFIG_MR_SCALPER
-    # strategy_config = STRATEGY_CONFIG_HFT_SCALPER
+    # strategy_config = STRATEGY_CONFIG_MR_SCALPER
+    strategy_config = STRATEGY_CONFIG_HFT_SCALPER
     # strategy_config = STRATEGY_CONFIG_BREAKOUT_SCALPER
 
     persistence_config = PersistenceConfig(

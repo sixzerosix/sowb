@@ -1,21 +1,8 @@
-import time
 import pandas as pd
 import talib
 import numpy as np
-from dataclasses import dataclass, field
 from typing import Dict, Any, Callable
-
-
-# Mock-класс конфигурации для демонстрации
-@dataclass
-class StrategyConfig:
-    """
-    Конфигурация стратегии, содержащая набор индикаторов и их параметры.
-    """
-
-    indicator_set: Dict[str, Dict[str, Any]] = field(default_factory=dict)
-    # Здесь могут быть и другие параметры стратегии
-
+from backtest.core.config import StrategyConfig  # Для типизации
 
 # ----------------------------------------------------------------------
 # ОТДЕЛЬНЫЕ ФУНКЦИИ ДЛЯ РАСЧЕТА КАЖДОГО ИНДИКАТОРА
@@ -38,6 +25,8 @@ def _calculate_atr_exit(df: pd.DataFrame, params: Dict[str, Any]) -> pd.DataFram
     df["atr_val"] = talib.ATR(
         df["high"], df["low"], df["close"], timeperiod=params.get("atr_len", 14)
     )
+    # Здесь мы также можем добавить ATR-Exit-уровни для бэктеста
+    df["atr_multiplier"] = params.get("min_multiplier", 2.0)
     print(f"--- DEBUG: Рассчитан ATR (len={params.get('atr_len', 14)}).")
     return df
 
@@ -102,7 +91,26 @@ def _calculate_htf_filter(df: pd.DataFrame, params: Dict[str, Any]) -> pd.DataFr
     return df
 
 
-# --- ИНДИКАТОРЫ ИЗ ЗАПРОШЕННОГО СПИСКА ---
+def _calculate_fibo(df: pd.DataFrame, params: Dict[str, Any]) -> pd.DataFrame:
+    """
+    Заглушка для Fibbonacci, так как логика его расчета сложна и
+    зависит от Swing Structures, которые нужно найти ранее.
+    Здесь мы просто добавляем нужные колонки (нужно для ядра Numba).
+    """
+    if "is_swing_high" in df.columns:
+        # В реальной стратегии здесь была бы сложная логика поиска ближайших свингов
+        # и расчета уровней Фибоначчи (0.382, 0.618 и т.д.)
+        df["fibo_level_382"] = df["close"].shift(10)  # Mock data
+        df["fibo_level_618"] = df["close"].shift(20)  # Mock data
+        print(
+            f"--- DEBUG: Добавлены Mock-колонки Фибоначчи (levels={params.get('levels', 'N/A')})."
+        )
+    else:
+        print("--- WARNING: FIBO пропущен. Требуется SWING_STRUCT.")
+    return df
+
+
+# --- НОВЫЕ ИНДИКАТОРЫ ---
 
 
 def _calculate_rsi(df: pd.DataFrame, params: Dict[str, Any]) -> pd.DataFrame:
@@ -195,7 +203,6 @@ def _calculate_cci(df: pd.DataFrame, params: Dict[str, Any]) -> pd.DataFrame:
 
 def _calculate_obv(df: pd.DataFrame, params: Dict[str, Any]) -> pd.DataFrame:
     """Расчет OBV (On-Balance Volume)."""
-    # OBV не требует дополнительных параметров времени, кроме исходных данных
     df["obv_val"] = talib.OBV(df["close"], df["volume"])
     print("--- DEBUG: Рассчитан OBV.")
     return df
@@ -206,7 +213,7 @@ def _calculate_standard_volume(
 ) -> pd.DataFrame:
     """Простой индикатор Объема (Volume)."""
     if "volume" in df.columns:
-        # Просто убеждаемся, что колонка существует и, возможно, нормируем её
+        # Просто убеждаемся, что колонка существует
         df["volume_val"] = df["volume"]
         print("--- DEBUG: Колонка Volume проверена и дублирована как volume_val.")
     else:
@@ -219,7 +226,6 @@ def _calculate_standard_volume(
 # ----------------------------------------------------------------------
 # ДИСПЕТЧЕР (КАРТА ФУНКЦИЙ)
 # ----------------------------------------------------------------------
-# Добавление нового индикатора: просто добавьте новую пару "КЛЮЧ": _новая_функция
 INDICATOR_DISPATCHER: Dict[
     str, Callable[[pd.DataFrame, Dict[str, Any]], pd.DataFrame]
 ] = {
@@ -228,8 +234,9 @@ INDICATOR_DISPATCHER: Dict[
     "ATR_EXIT": _calculate_atr_exit,
     "SWING_STRUCT": _calculate_swing_struct,
     "HTF_FILTER": _calculate_htf_filter,
+    "FIBO": _calculate_fibo,  # Добавлен FIBO
     # Запрошенные индикаторы тренда и осцилляторов
-    "RSI": _calculate_rsi,  # Переименован с RSI_FILTER
+    "RSI": _calculate_rsi,
     "MACD": _calculate_macd,
     "PARABOLIC_SAR": _calculate_parabolic_sar,
     "BOLLINGER_BANDS": _calculate_bollinger_bands,
@@ -238,9 +245,6 @@ INDICATOR_DISPATCHER: Dict[
     # Запрошенные индикаторы объёма
     "OBV": _calculate_obv,
     "VOLUME": _calculate_standard_volume,
-    # NOTE: Рыночный профиль требует данных тиков и сложной агрегации,
-    # его расчет лучше производить на стороне Go/QuestDB. Здесь оставлен как комментарий.
-    # "MARKET_PROFILE": _calculate_market_profile,
 }
 
 
@@ -254,11 +258,6 @@ def calculate_strategy_indicators(
 ) -> pd.DataFrame:
     """
     Расчет технических индикаторов на основе конфигурации StrategyConfig.indicator_set.
-    Использует паттерн диспетчеризации для модульности.
-
-    :param df: Исходный DataFrame с OHLCV данными.
-    :param config: Объект StrategyConfig с настройками индикаторов.
-    :return: DataFrame с добавленными колонками индикаторов.
     """
     # Создаем копию DataFrame, чтобы избежать SettingWithCopyWarning
     df = df.copy()
@@ -291,66 +290,3 @@ def calculate_strategy_indicators(
     )
 
     return df_clean
-
-
-# --- Пример использования ---
-
-# 1. Создание тестовых данных (1000000 1-минутных свечей)
-data = {
-    "timestamp": pd.to_datetime(pd.date_range("2023-01-01", periods=500000, freq="1T")),
-    "open": 100 + np.random.randn(500000).cumsum(),
-    "high": 101 + np.random.randn(500000).cumsum(),
-    "low": 99 + np.random.randn(500000).cumsum(),
-    "close": 100 + np.random.randn(500000).cumsum(),
-    "volume": np.random.randint(100, 10000, 500000),
-}
-df_test = pd.DataFrame(data)
-
-# 2. Определение конфигурации стратегии
-# Активируем несколько новых и существующих индикаторов с пользовательскими параметрами
-strategy_config_test = StrategyConfig(
-    indicator_set={
-        "EMA_TREND": {"fast_len": 10, "slow_len": 30},
-        "RSI": {"rsi_len": 7},  # Короткий RSI для быстрого отклика
-        "MACD": {
-            # Используем параметры по умолчанию
-        },
-        "BOLLINGER_BANDS": {
-            "period": 20,
-            "dev_up": 2.5,  # Увеличиваем стандартное отклонение для более широких полос
-            "dev_dn": 2.5,
-        },
-        "STOCHASTIC": {"fastk": 14, "slowk": 3, "slowd": 3},
-        "OBV": {},  # Без параметров
-        "ATR_EXIT": {},  # Используем параметры по умолчанию
-        # Остальные индикаторы (SWING_STRUCT, HTF_FILTER, PARABOLIC_SAR, CCI, VOLUME) не указаны и не будут рассчитаны
-    }
-)
-start_time = time.time()
-# 3. Расчет
-df_with_indicators = calculate_strategy_indicators(df_test, strategy_config_test)
-end_time = time.time()
-execution_time = end_time - start_time
-print(f"--- INFO: Время выполнения расчета индикаторов: {execution_time:.4f} секунд.")
-
-# 4. Вывод результата
-print("\n--- Результат (Первые 5 строк) ---")
-# Выводим столбцы, включая новые MACD, BB, STOCH и OBV
-print(
-    df_with_indicators[
-        [
-            "timestamp",
-            "close",
-            "ema_fast",
-            "rsi_val",
-            "macd_hist",
-            "bb_upper",
-            "stoch_k",
-            "obv_val",
-        ]
-    ].head()
-)
-
-# Проверка, что все необходимые колонки присутствуют
-print("\nКолонки в финальном DataFrame:")
-print(list(df_with_indicators.columns))

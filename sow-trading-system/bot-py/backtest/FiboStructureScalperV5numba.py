@@ -18,7 +18,7 @@ from math import copysign
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 FILE_PATH = os.path.join(
     SCRIPT_DIR,
-    "BTC_USDT_1m_2025-07-01_00_00_00_to_2025-09-01_00_00_00.csv",
+    "BTC_USDT_1m_2023-08-01 00_00_00_to_2025-08-01_00_00_00.csv",
 )
 
 if not os.path.exists(FILE_PATH):
@@ -702,7 +702,7 @@ def persist_results(trades_df, config: PersistenceConfig):
                 "close_reason",
                 "equity_after_trade",
             ]
-            with open(txt_path, "w") as f:
+            with open(txt_path, "w", encoding="utf-8") as f:
                 f.write("--- ЛОГ СДЕЛОК БЭКТЕСТА ---\n")
                 f.write(trades_df[log_cols].to_string())
             print(f"[PERSIST] Успешно сохранено в TXT: {os.path.basename(txt_path)}")
@@ -857,16 +857,88 @@ if __name__ == "__main__":
 
     # 1. ИНИЦИАЛИЗАЦИЯ КОНФИГУРАЦИЙ
     strategy_config = StrategyConfig(
-        initial_capital=100.0,
-        leverage=10.0,
-        target_roi_percent=20.0,
-        risk_roi_percent=10.0,
+        initial_capital=10.0,
+        leverage=4.0,
+        target_roi_percent=30.0,
+        risk_roi_percent=30.0,
         # ema_fast_len=9, # Можно переопределять любые параметры здесь
     )
 
+    # --- ПРИМЕРЫ КОНФИГУРАЦИЙ ---
+
+    # 1. SCALP_DEFAULT: Агрессивный скальпинг
+    # Низкий процент прибыли/риска, высокая частота сделок, умеренное плечо.
+    SCALP_DEFAULT = StrategyConfig(
+        initial_capital=10.0,
+        leverage=5.0,
+        target_roi_percent=20.0,  # Цель: +20% от позиции (быстрое закрытие)
+        risk_roi_percent=10.0,  # Риск: -10% от позиции (соотношение R:R 2:1)
+        ema_fast_len=7,  # Очень быстрая EMA
+        ema_slow_len=25,  # Более быстрая медленная EMA
+        rsi_period=14,
+        fibo_depth=100,
+    )
+
+    # 2. BALANCED_DAYTRADE: Сбалансированная внутридневная торговля
+    # Умеренное соотношение риска к прибыли (1:1), среднее плечо, стандартные индикаторы.
+    BALANCED_DAYTRADE = StrategyConfig(
+        initial_capital=100.0,
+        leverage=3.0,
+        target_roi_percent=30.0,  # Цель: +30%
+        risk_roi_percent=30.0,  # Риск: -30% (соотношение R:R 1:1)
+        ema_fast_len=12,  # Стандартная EMA
+        ema_slow_len=50,  # Стандартная медленная EMA
+        rsi_period=14,
+        fibo_depth=150,  # Средняя глубина поиска структуры
+    )
+
+    # 3. SWING_LOW_LEVERAGE: Свинг-трейдинг с низким риском
+    # Низкое плечо, широкие цели и стопы, медленные индикаторы для фильтрации шума.
+    SWING_LOW_LEVERAGE = StrategyConfig(
+        initial_capital=500.0,
+        leverage=1.5,
+        target_roi_percent=50.0,  # Цель: +50% (долгий ход)
+        risk_roi_percent=25.0,  # Риск: -25% (соотношение R:R 2:1)
+        ema_fast_len=20,  # Медленная EMA
+        ema_slow_len=100,  # Очень медленная EMA (для сильного тренда)
+        rsi_period=21,  # Более длинный RSI
+        fibo_depth=300,  # Глубокий поиск структуры
+    )
+
+    # 4. HIGH_RISK_HIGH_REWARD: Высокий риск / Высокая награда
+    # Агрессивное плечо и очень выгодное соотношение R:R (3:1) в расчете на сильное движение.
+    HIGH_RISK_HIGH_REWARD = StrategyConfig(
+        initial_capital=50.0,
+        leverage=8.0,
+        target_roi_percent=45.0,  # Цель: +45%
+        risk_roi_percent=15.0,  # Риск: -15% (соотношение R:R 3:1)
+        ema_fast_len=9,
+        ema_slow_len=30,
+        rsi_period=10,  # Более чувствительный RSI
+        fibo_depth=120,
+    )
+
+    # 5. CONSERVATIVE_CONFIRMATION: Консервативный с фильтром
+    # Упор на подтверждение долгосрочного тренда (высокое значение ema_slow_len)
+    CONSERVATIVE_CONFIRMATION = StrategyConfig(
+        initial_capital=200.0,
+        leverage=2.0,
+        target_roi_percent=25.0,
+        risk_roi_percent=20.0,
+        ema_fast_len=15,
+        ema_slow_len=200,  # Очень длинный период для фильтрации
+        rsi_period=14,
+        fibo_depth=200,
+    )
+
+    # --- ПРИМЕР ИСПОЛЬЗОВАНИЯ В ВАШЕМ СКРИПТЕ ---
+
+    # Выберите одну из конфигураций для запуска бэктеста:
+    strategy_config = HIGH_RISK_HIGH_REWARD
+
     persistence_config = PersistenceConfig(
         save_to_sqlite=True,
-        save_to_csv=True,
+        save_to_csv=False,
         save_to_txt=False,  # Отключено по умолчанию
         table_name="fibo_scalper_run_1",  # Указываем конкретную таблицу для этого прогона
     )

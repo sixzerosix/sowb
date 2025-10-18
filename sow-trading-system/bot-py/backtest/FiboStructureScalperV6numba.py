@@ -18,7 +18,7 @@ from math import copysign
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 FILE_PATH = os.path.join(
     SCRIPT_DIR,
-    "BTC_USDT_1m_2023-08-01 00_00_00_to_2025-08-01_00_00_00.csv",
+    "BTC_USDT_1m_2025-07-01_00_00_00_to_2025-09-01_00_00_00.csv",
 )
 
 if not os.path.exists(FILE_PATH):
@@ -965,9 +965,9 @@ if __name__ == "__main__":
     # Теперь мы можем легко менять индикаторы, меняя словарь indicator_set!
     strategy_config = StrategyConfig(
         initial_capital=1000.0,
-        leverage=5.0,
-        target_roi_percent=15.0,
-        risk_roi_percent=5.0,
+        leverage=12.0,
+        target_roi_percent=20.0,
+        risk_roi_percent=10.0,
         # Переопределяем параметры индикаторов через новый модульный словарь:
         indicator_set={
             "EMA_TREND": {"fast_len": 12, "slow_len": 26},  # MACD-подобные настройки
@@ -986,7 +986,7 @@ if __name__ == "__main__":
     )
 
     print("\n[INFO] Начинаем загрузку данных...")
-    start_time = time.time()
+    # start_time = time.time()
 
     # 2. ЗАГРУЗКА И РАСЧЕТ ИНДИКАТОРОВ
     df_raw = load_data(FILE_PATH)
@@ -994,6 +994,7 @@ if __name__ == "__main__":
     # Обратите внимание, что мы вызываем новую функцию calculate_strategy_indicators
     df_processed = calculate_strategy_indicators(df_raw, strategy_config)
 
+    start_time = time.time()
     # 3. ЗАПУСК БЭКТЕСТА
     # Numba-ядро остается неизменным, оно берет нужные массивы,
     # а логику подготовки данных мы уже сделали модульной.

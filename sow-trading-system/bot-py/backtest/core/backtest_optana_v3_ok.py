@@ -10,6 +10,7 @@ from rich.panel import Panel
 from rich import box
 from dataclasses import dataclass, field
 import matplotlib.pyplot as plt
+from numba import jit, prange
 
 from backtest.core.data_loader import load_data
 from backtest.core.config import FILE_PATH
@@ -17,9 +18,9 @@ from backtest.core.config import FILE_PATH
 # Инициализация консоли Rich
 console = Console()
 
-# =========================================================================
+# ================================================================================
 # === 1. КОНФИГУРАЦИЯ (StrategyConfig, PersistenceConfig, OptimizationParams) ===
-# =========================================================================
+# ================================================================================
 
 
 @dataclass
@@ -64,7 +65,7 @@ class OptimizationParams:
         75,
     )  # Уровень перекупленности для SHORT входа
     ATR_LEN_RANGE: Tuple[int, int] = (5, 30)
-    N_TRIALS: int = 200  # Увеличено для более качественной оптимизации
+    N_TRIALS: int = 100  # Увеличено для более качественной оптимизации
     OPTIMIZATION_METRIC: str = "Total PnL"
 
 
@@ -79,93 +80,89 @@ DEFAULT_CONFIG = StrategyConfig(
 STRATEGY_CONFIGS = {"DEFAULT_CONFIG": DEFAULT_CONFIG}
 
 
-# =========================================================================
-# === 2. ЗАГРУЗКА ДАННЫХ (load_data) ===
-# =========================================================================
+# ================================================================================
+# === 2. NUMBA-УСКОРЕННЫЕ ИНДИКАТОРЫ ===
+# ================================================================================
 
 
-# АКТИВИРОВАНА заглушка для загрузки данных, чтобы сделать файл самодостаточным
-# def load_data() -> pd.DataFrame:
-#     """
-#     Генерация более реалистичных синтетических данных OHLCV.
-#     В реальном проекте здесь будет код для загрузки файла CSV.
-#     """
-#     console.print(
-#         f"[bold blue][LOADER][/bold blue] Загрузка синтетических данных (Mock/Real CSV Placeholder)..."
-#     )
-#     periods = 5000  # Увеличено для более осмысленного бэктеста
-#     np.random.seed(42)
+@jit(nopython=True)
+def calculate_ema_numba(data: np.ndarray, span: int) -> np.ndarray:
+    """Расчет EMA с использованием Numba."""
+    alpha = 2.0 / (span + 1.0)
+    result = np.empty_like(data)
+    result[0] = data[0]
 
-#     # 1. Генерация базовой цены (случайное блуждание с трендом)
-#     base_price = 100 + np.random.randn(periods).cumsum() * 0.1
-#     # Добавление слабого восходящего тренда
-#     trend = np.linspace(0, 5, periods)
-#     close_price = base_price + trend
+    for i in range(1, len(data)):
+        result[i] = alpha * data[i] + (1 - alpha) * result[i - 1]
 
-#     # 2. Создание OHLCV
-#     data = {
-#         "timestamp": pd.date_range("2025-07-01", periods=periods, freq="1T"),
-#         "close": close_price,
-#     }
-#     df = pd.DataFrame(data)
-
-#     # Open = Close shift(1) + небольшая случайная вариация
-#     df["open"] = df["close"].shift(1).fillna(df["close"]) * (
-#         1 + np.random.uniform(-0.0001, 0.0001, periods)
-#     )
-
-#     # High/Low вокруг Open и Close
-#     df["high"] = df[["open", "close"]].max(axis=1) + np.random.rand(periods) * 0.05
-#     df["low"] = df[["open", "close"]].min(axis=1) - np.random.rand(periods) * 0.05
-
-#     # Volume
-#     df["volume"] = np.random.randint(100, 10000, periods)
-
-#     df = df.dropna().set_index("timestamp")
-
-#     console.print(
-#         f"[bold blue][LOADER][/bold blue] Загружено {len(df)} строк данных с {df.index.min()} по {df.index.max()}."
-#     )
-#     return df
+    return result
 
 
-# =========================================================================
-# === 3. ИНДИКАТОРЫ (calculate_strategy_indicators - БЕЗ TALIB) ===
-# =========================================================================
+@jit(nopython=True)
+def calculate_rsi_numba(data: np.ndarray, length: int) -> np.ndarray:
+    """Расчет RSI с использованием Numba."""
+    n = len(data)
+    rsi = np.full(n, np.nan)
 
+    if n < length + 1:
+        return rsi
 
-# Вспомогательная функция для расчета RSI (без talib)
-def _calculate_rsi(series: pd.Series, length: int) -> pd.Series:
-    """Расчет RSI, используя чистый Pandas/Numpy."""
-    delta = series.diff()
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
+    deltas = np.diff(data)
+    gains = np.where(deltas > 0, deltas, 0.0)
+    losses = np.where(deltas < 0, -deltas, 0.0)
 
-    # Средние значения (SMA/RMA) - используем EMA для сглаживания, как и в TALIB (RMA)
-    avg_gain = gain.ewm(span=length, adjust=False, min_periods=length).mean()
-    avg_loss = loss.ewm(span=length, adjust=False, min_periods=length).mean()
+    # Первое среднее
+    avg_gain = np.mean(gains[:length])
+    avg_loss = np.mean(losses[:length])
 
-    # Избегаем деления на ноль
-    rs = avg_gain / avg_loss.replace(0, 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    if avg_loss == 0:
+        rsi[length] = 100.0
+    else:
+        rs = avg_gain / avg_loss
+        rsi[length] = 100.0 - (100.0 / (1.0 + rs))
+
+    # EMA для остальных значений
+    alpha = 1.0 / length
+    for i in range(length, n - 1):
+        avg_gain = alpha * gains[i] + (1 - alpha) * avg_gain
+        avg_loss = alpha * losses[i] + (1 - alpha) * avg_loss
+
+        if avg_loss == 0:
+            rsi[i + 1] = 100.0
+        else:
+            rs = avg_gain / avg_loss
+            rsi[i + 1] = 100.0 - (100.0 / (1.0 + rs))
+
     return rsi
 
 
-# Вспомогательная функция для расчета ATR (без talib)
-def _calculate_atr(df: pd.DataFrame, length: int) -> pd.Series:
-    """Расчет ATR, используя чистый Pandas/Numpy."""
-    high = df["high"]
-    low = df["low"]
-    close_prev = df["close"].shift(1)
+@jit(nopython=True)
+def calculate_atr_numba(
+    high: np.ndarray, low: np.ndarray, close: np.ndarray, length: int
+) -> np.ndarray:
+    """Расчет ATR с использованием Numba."""
+    n = len(high)
+    atr = np.full(n, np.nan)
 
-    # True Range (TR)
-    tr1 = high - low
-    tr2 = (high - close_prev).abs()
-    tr3 = (low - close_prev).abs()
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    if n < length + 1:
+        return atr
 
-    # Average True Range (ATR) - используем RMA (EMA) для сглаживания
-    atr = tr.ewm(span=length, adjust=False, min_periods=length).mean()
+    # True Range
+    tr = np.empty(n - 1)
+    for i in range(1, n):
+        hl = high[i] - low[i]
+        hc = abs(high[i] - close[i - 1])
+        lc = abs(low[i] - close[i - 1])
+        tr[i - 1] = max(hl, hc, lc)
+
+    # Первое среднее
+    atr[length] = np.mean(tr[:length])
+
+    # EMA для остальных значений
+    alpha = 1.0 / length
+    for i in range(length, n - 1):
+        atr[i + 1] = alpha * tr[i] + (1 - alpha) * atr[i]
+
     return atr
 
 
@@ -173,54 +170,190 @@ def calculate_strategy_indicators(
     df: pd.DataFrame, config: StrategyConfig
 ) -> pd.DataFrame:
     """
-    Расчет технических индикаторов на основе конфигурации StrategyConfig.indicator_set.
-    Использует чистые функции Pandas/Numpy.
+    Расчет технических индикаторов с использованием Numba.
     """
     df = df.copy()
     params = config.indicator_set
+
+    # Преобразуем данные в numpy массивы
+    close_arr = df["close"].values
+    high_arr = df["high"].values
+    low_arr = df["low"].values
 
     # 1. EMA Trend
     ema_params = params.get("EMA_TREND", {})
     fast_len = ema_params.get("fast_len", 9)
     slow_len = ema_params.get("slow_len", 21)
 
-    df["ema_fast"] = df["close"].ewm(span=fast_len, adjust=False).mean()
-    df["ema_slow"] = df["close"].ewm(span=slow_len, adjust=False).mean()
+    df["ema_fast"] = calculate_ema_numba(close_arr, fast_len)
+    df["ema_slow"] = calculate_ema_numba(close_arr, slow_len)
     df["trend_up"] = df["ema_fast"] > df["ema_slow"]
-    df["trend_down"] = df["ema_fast"] < df["ema_slow"]  # Добавлено для SHORT
+    df["trend_down"] = df["ema_fast"] < df["ema_slow"]
 
     # 2. RSI
     rsi_params = params.get("RSI_ENTRY_EXIT", {})
     rsi_len = rsi_params.get("rsi_len", 14)
-    df["rsi_val"] = _calculate_rsi(df["close"], rsi_len)
+    df["rsi_val"] = calculate_rsi_numba(close_arr, rsi_len)
 
     # 3. ATR
     atr_params = params.get("ATR_STOP", {})
     atr_len = atr_params.get("atr_len", 14)
-    df["atr_val"] = _calculate_atr(df, atr_len)
+    df["atr_val"] = calculate_atr_numba(high_arr, low_arr, close_arr, atr_len)
 
     # Удаляем NaN после всех расчетов
     df_clean = df.dropna()
 
     console.print(
-        f"[bold yellow][INDICATORS][/bold yellow] Рассчитано. Исходно: {len(df)}, После очистки: {len(df_clean)}"
+        f"[bold yellow][INDICATORS][/bold yellow] Рассчитано (Numba). Исходно: {len(df)}, После очистки: {len(df_clean)}"
     )
     return df_clean
 
 
-# =========================================================================
-# === 4. BACKTEST ENGINE (backtest_engine) ===
-# =========================================================================
+# ================================================================================
+# === 3. NUMBA-УСКОРЕННЫЙ BACKTEST ENGINE ===
+# ================================================================================
+
+
+@jit(nopython=True)
+def backtest_core_numba(
+    close: np.ndarray,
+    high: np.ndarray,
+    low: np.ndarray,
+    trend_up: np.ndarray,
+    trend_down: np.ndarray,
+    rsi_val: np.ndarray,
+    atr_val: np.ndarray,
+    initial_capital: float,
+    rsi_entry_low: float,
+    rsi_exit_high: float,
+    atr_multiplier: float,
+) -> Tuple[
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    int,
+]:
+    """
+    Ядро бэктеста с использованием Numba.
+    Возвращает массивы данных о сделках.
+    """
+    n = len(close)
+    max_trades = n  # Максимальное количество сделок
+
+    # Массивы для хранения сделок
+    entry_indices = np.empty(max_trades, dtype=np.int32)
+    exit_indices = np.empty(max_trades, dtype=np.int32)
+    entry_prices = np.empty(max_trades, dtype=np.float64)
+    exit_prices = np.empty(max_trades, dtype=np.float64)
+    pnls = np.empty(max_trades, dtype=np.float64)
+    sides = np.empty(max_trades, dtype=np.int8)  # 1 = LONG, -1 = SHORT
+    exit_reasons = np.empty(max_trades, dtype=np.int8)  # 0 = SL, 1 = TP, 2 = RSI_EXIT
+    liquidations = np.empty(max_trades, dtype=np.int8)
+
+    trade_count = 0
+    current_equity = initial_capital
+
+    # Состояние позиции: 0 = нет позиции, 1 = LONG, -1 = SHORT
+    position_side = 0
+    entry_price = 0.0
+    sl_price = 0.0
+    tp_price = 0.0
+    entry_idx = 0
+
+    for i in range(1, n):
+        # Проверка открытой позиции
+        if position_side != 0:
+            exit_reason = -1
+            exit_price = close[i]
+
+            if position_side == 1:  # LONG
+                if low[i] <= sl_price:
+                    exit_reason = 0  # SL
+                    exit_price = sl_price
+                elif high[i] >= tp_price:
+                    exit_reason = 1  # TP
+                    exit_price = tp_price
+                elif rsi_val[i] >= rsi_exit_high:
+                    exit_reason = 2  # RSI_EXIT
+                    exit_price = close[i]
+
+            elif position_side == -1:  # SHORT
+                if high[i] >= sl_price:
+                    exit_reason = 0  # SL
+                    exit_price = sl_price
+                elif low[i] <= tp_price:
+                    exit_reason = 1  # TP
+                    exit_price = tp_price
+                elif rsi_val[i] <= rsi_entry_low:
+                    exit_reason = 2  # RSI_EXIT
+                    exit_price = close[i]
+
+            # Закрытие позиции
+            if exit_reason >= 0:
+                if position_side == 1:
+                    pnl = (exit_price - entry_price) / entry_price * current_equity
+                else:
+                    pnl = (entry_price - exit_price) / entry_price * current_equity
+
+                current_equity += pnl
+
+                # Сохранение сделки
+                entry_indices[trade_count] = entry_idx
+                exit_indices[trade_count] = i
+                entry_prices[trade_count] = entry_price
+                exit_prices[trade_count] = exit_price
+                pnls[trade_count] = pnl
+                sides[trade_count] = position_side
+                exit_reasons[trade_count] = exit_reason
+                liquidations[trade_count] = 1 if exit_reason == 0 else 0
+
+                trade_count += 1
+                position_side = 0
+
+        # Проверка условий входа
+        if position_side == 0:
+            # LONG ENTRY
+            if trend_up[i] and rsi_val[i] < rsi_entry_low:
+                entry_price = close[i]
+                sl_amount = atr_val[i] * atr_multiplier
+                sl_price = entry_price - sl_amount
+                tp_price = entry_price + sl_amount * 2
+                position_side = 1
+                entry_idx = i
+
+            # SHORT ENTRY
+            elif trend_down[i] and rsi_val[i] > rsi_exit_high:
+                entry_price = close[i]
+                sl_amount = atr_val[i] * atr_multiplier
+                sl_price = entry_price + sl_amount
+                tp_price = entry_price - sl_amount * 2
+                position_side = -1
+                entry_idx = i
+
+    return (
+        entry_indices[:trade_count],
+        exit_indices[:trade_count],
+        entry_prices[:trade_count],
+        exit_prices[:trade_count],
+        pnls[:trade_count],
+        sides[:trade_count],
+        exit_reasons[:trade_count],
+        liquidations[:trade_count],
+        trade_count,
+    )
 
 
 def backtest_engine(
     df: pd.DataFrame, config: StrategyConfig
 ) -> Tuple[pd.DataFrame, float]:
     """
-    Реалистичный (но упрощенный) Backtest Engine.
-    Отслеживает открытые сделки, использует ATR для SL и RSI для TP/фильтра.
+    Обертка для Numba-ускоренного бэктеста.
     """
-
     initial_capital = config.initial_capital
 
     # Параметры стратегии
@@ -228,153 +361,77 @@ def backtest_engine(
     rsi_exit_high = config.indicator_set.get("RSI_ENTRY_EXIT", {}).get("exit_high", 70)
     atr_multiplier = config.indicator_set.get("ATR_STOP", {}).get("multiplier", 1.5)
 
-    trades = []
-    equity_history: List[float] = [initial_capital]
+    # Преобразование данных в numpy массивы
+    close_arr = df["close"].values
+    high_arr = df["high"].values
+    low_arr = df["low"].values
+    trend_up_arr = df["trend_up"].values
+    trend_down_arr = df["trend_down"].values
+    rsi_arr = df["rsi_val"].values
+    atr_arr = df["atr_val"].values
 
+    # Запуск Numba-ускоренного бэктеста
+    (
+        entry_indices,
+        exit_indices,
+        entry_prices,
+        exit_prices,
+        pnls,
+        sides,
+        exit_reasons,
+        liquidations,
+        trade_count,
+    ) = backtest_core_numba(
+        close_arr,
+        high_arr,
+        low_arr,
+        trend_up_arr,
+        trend_down_arr,
+        rsi_arr,
+        atr_arr,
+        initial_capital,
+        rsi_entry_low,
+        rsi_exit_high,
+        atr_multiplier,
+    )
+
+    # Формирование DataFrame с результатами
+    trades = []
     current_equity = initial_capital
 
-    # Структура открытой позиции: (entry_index, entry_price, side, stop_loss_price, take_profit_price)
-    open_position: Optional[Tuple[int, float, str, float, float]] = None
-    trade_id = 0
+    for i in range(trade_count):
+        current_equity_before = current_equity
+        current_equity += pnls[i]
 
-    # Проходим по данным, начиная с момента, когда есть индикаторы
-    for i in range(1, len(df)):
-        current_row = df.iloc[i]
+        side_str = "LONG" if sides[i] == 1 else "SHORT"
 
-        # ---------------------------------
-        # 1. ОБРАБОТКА ОТКРЫТОЙ ПОЗИЦИИ
-        # ---------------------------------
-        if open_position is not None:
-            entry_index, entry_price, side, sl_price, tp_price = open_position
-            pnl = 0.0
-
-            # --- Условия выхода (SL/TP) ---
-            exit_reason = None
-            exit_price = current_row["close"]  # Цена закрытия по умолчанию
-
-            if side == "LONG":
-                # Exit by Stop Loss (Low < SL)
-                if current_row["low"] <= sl_price:
-                    exit_reason = "SL"
-                    exit_price = sl_price
-                # Exit by Take Profit (High >= TP)
-                elif current_row["high"] >= tp_price:
-                    exit_reason = "TP"
-                    exit_price = tp_price
-                # Exit by reverse trend (RSI too high)
-                elif current_row["rsi_val"] >= rsi_exit_high:
-                    exit_reason = "RSI_EXIT"
-                    exit_price = current_row["close"]
-
-            elif side == "SHORT":
-                # Exit by Stop Loss (High >= SL)
-                if current_row["high"] >= sl_price:
-                    exit_reason = "SL"
-                    exit_price = sl_price
-                # Exit by Take Profit (Low <= TP)
-                elif current_row["low"] <= tp_price:
-                    exit_reason = "TP"
-                    exit_price = tp_price
-                # Exit by reverse trend (RSI too low)
-                elif current_row["rsi_val"] <= rsi_entry_low:
-                    exit_reason = "RSI_EXIT"
-                    exit_price = current_row["close"]
-
-            # Если позиция закрыта (СКОРРЕКТИРОВАННЫЙ РАСЧЕТ PNL)
-            if exit_reason is not None:
-                # PnL рассчитывается как процентное изменение, умноженное на капитал (упрощенно)
-                if side == "LONG":
-                    pnl = (exit_price - entry_price) / entry_price * current_equity
-                elif side == "SHORT":
-                    pnl = (entry_price - exit_price) / entry_price * current_equity
-                else:
-                    pnl = 0.0
-
-                pnl_percent = pnl / current_equity  # Процент PnL от текущего капитала
-
-                # Обновление капитала
-                current_equity += pnl
-
-                # Запись сделки
-                is_liquidation = (
-                    1 if exit_reason == "SL" else 0
-                )  # Упрощенно: SL считается "ликвидацией"
-                trades.append(
-                    {
-                        "trade_id": trade_id,
-                        "entry_time": df.index[entry_index],
-                        "exit_time": current_row.name,
-                        "side": side,
-                        "entry_price": entry_price,
-                        "exit_price": exit_price,
-                        "pnl": pnl,
-                        "pnl_percent": pnl_percent * 100,
-                        "entry_value": initial_capital,
-                        "liquidation": is_liquidation,
-                    }
-                )
-                open_position = None  # Закрываем позицию
-
-        # ---------------------------------
-        # 2. УСЛОВИЯ ВХОДА
-        # ---------------------------------
-        if open_position is None:
-
-            # --- LONG ENTRY ---
-            long_entry_condition = (
-                current_row["trend_up"] == True  # EMA fast > EMA slow
-                and current_row["rsi_val"] < rsi_entry_low  # RSI в зоне перепроданности
-            )
-
-            if long_entry_condition:
-                trade_id += 1
-
-                entry_price = current_row["close"]
-                current_atr = current_row["atr_val"]
-
-                # Расчет SL/TP на основе ATR
-                sl_amount = current_atr * atr_multiplier
-                sl_price = entry_price - sl_amount
-
-                # Для простоты: TP - это фиксированное ATR расстояние (2x риск)
-                tp_price = entry_price + sl_amount * 2
-
-                open_position = (i, entry_price, "LONG", sl_price, tp_price)
-
-            # --- SHORT ENTRY (ДОБАВЛЕНО) ---
-            short_entry_condition = (
-                current_row["trend_down"] == True  # EMA fast < EMA slow
-                and current_row["rsi_val"] > rsi_exit_high  # RSI в зоне перекупленности
-            )
-
-            if short_entry_condition:
-                trade_id += 1
-
-                entry_price = current_row["close"]
-                current_atr = current_row["atr_val"]
-
-                # Расчет SL/TP на основе ATR
-                sl_amount = current_atr * atr_multiplier
-                sl_price = entry_price + sl_amount
-
-                # Для простоты: TP - это фиксированное ATR расстояние (2x риск)
-                tp_price = entry_price - sl_amount * 2
-
-                open_position = (i, entry_price, "SHORT", sl_price, tp_price)
-
-        equity_history.append(current_equity)
+        trades.append(
+            {
+                "trade_id": i,
+                "entry_time": df.index[entry_indices[i]],
+                "exit_time": df.index[exit_indices[i]],
+                "side": side_str,
+                "entry_price": entry_prices[i],
+                "exit_price": exit_prices[i],
+                "pnl": pnls[i],
+                "pnl_percent": (pnls[i] / current_equity_before) * 100,
+                "entry_value": initial_capital,
+                "liquidation": liquidations[i],
+            }
+        )
 
     trades_df = pd.DataFrame(trades)
+    final_equity = initial_capital + pnls.sum() if trade_count > 0 else initial_capital
 
     console.print(
-        f"[bold green][BACKTEST][/bold green] Завершено. Сделок: {len(trades_df)}, Финальный капитал: {current_equity:.2f}"
+        f"[bold green][BACKTEST][/bold green] Завершено (Numba). Сделок: {len(trades_df)}, Финальный капитал: {final_equity:.2f}"
     )
-    return trades_df, current_equity
+    return trades_df, final_equity
 
 
-# =========================================================================
-# === 5. АНАЛИЗ И ОТЧЕТНОСТЬ (analysis & persistence) ===
-# =========================================================================
+# ================================================================================
+# === 4. АНАЛИЗ И ОТЧЕТНОСТЬ (analysis & persistence) ===
+# ================================================================================
 
 
 def calculate_metrics(
@@ -457,10 +514,10 @@ def display_results_rich(
     pnl_style = "bold green" if metrics.get("Total PnL", 0) >= 0 else "bold red"
     dd_style = "bold red" if metrics.get("Max Drawdown (%)", 0) > 10 else "bold green"
 
-    table.add_row("Начальный капитал", f"${metrics['Initial Capital']:.2f}")
-    table.add_row("Финальный капитал", f"${metrics['Final Equity']:.2f}")
+    table.add_row("Начальный капитал", f"\${metrics['Initial Capital']:.2f}")
+    table.add_row("Финальный капитал", f"\${metrics['Final Equity']:.2f}")
     table.add_row(
-        "Общий PnL", f"[{pnl_style}]${metrics['Total PnL']:.2f}[/{pnl_style}]"
+        "Общий PnL", f"[{pnl_style}]\${metrics['Total PnL']:.2f}[/{pnl_style}]"
     )
     table.add_row(
         "Доходность (RoC)", f"[{pnl_style}]{metrics['RoC (%)']:.2f}%[/{pnl_style}]"
@@ -616,16 +673,16 @@ def persist_optimization_result(
     )
 
 
-# =========================================================================
-# === 6. ЛОГИКА ОПТИМИЗАЦИИ OPTUNA (ОСНОВНАЯ ЧАСТЬ) ===
-# =========================================================================
+# ================================================================================
+# === 5. ЛОГИКА ОПТИМИЗАЦИИ OPTUNA (С NUMBA) ===
+# ================================================================================
 
 
 def objective(
     trial: optuna.Trial, data_df: pd.DataFrame, base_config: StrategyConfig
 ) -> float:
     """
-    Целевая функция для Optuna.
+    Целевая функция для Optuna с Numba-ускорением.
     """
     config = copy.deepcopy(base_config)
 
@@ -680,7 +737,7 @@ def objective(
         "multiplier": 1.5,
     }  # multiplier не оптимизируем для простоты
 
-    # 3. Расчет индикаторов и запуск бэктеста
+    # 3. Расчет индикаторов и запуск бэктеста (с Numba)
     df_with_indicators = calculate_strategy_indicators(data_df, config)
     trades_df, final_equity = backtest_engine(df_with_indicators, config)
 
@@ -711,7 +768,7 @@ def optimize_strategy_optuna(
     start_time: float,
 ) -> Optional[StrategyConfig]:
     """
-    Основная функция для запуска оптимизации с помощью Optuna.
+    Основная функция для запуска оптимизации с помощью Optuna (с Numba).
     """
 
     metric_name = OptimizationParams.OPTIMIZATION_METRIC
@@ -722,7 +779,9 @@ def optimize_strategy_optuna(
         sampler=optuna.samplers.TPESampler(seed=42),  # Для воспроизводимости
     )
 
-    console.print(f"\n[bold yellow]--- НАЧАЛО ОПТИМИЗАЦИИ OPTUNA ---[/bold yellow]")
+    console.print(
+        f"\n[bold yellow]--- НАЧАЛО ОПТИМИЗАЦИИ OPTUNA (с Numba) ---[/bold yellow]"
+    )
     console.print(
         f"Целевая метрика: [cyan]{metric_name}[/cyan] ([magenta]{direction}[/magenta])"
     )
@@ -731,7 +790,7 @@ def optimize_strategy_optuna(
     study.optimize(
         lambda trial: objective(trial, data_df, base_config),
         n_trials=OptimizationParams.N_TRIALS,
-        n_jobs=-1,  # Параллельный запуск
+        n_jobs=1,  # Numba лучше работает с n_jobs=1, параллелизм внутри функций
         show_progress_bar=True,
     )
 
@@ -804,9 +863,9 @@ def optimize_strategy_optuna(
     return best_config
 
 
-# =========================================================================
+# ================================================================================
 # === ОСНОВНАЯ ТОЧКА ВХОДА ===
-# =========================================================================
+# ================================================================================
 
 if __name__ == "__main__":
 
@@ -837,7 +896,7 @@ if __name__ == "__main__":
         if best_config:
             # Результаты уже выведены в display_results_rich
             console.print(
-                "\n[bold green]--- ОПТИМИЗАЦИЯ ЗАВЕРШЕНА УСПЕШНО ---[/bold green]"
+                "\n[bold green]--- ОПТИМИЗАЦИЯ ЗАВЕРШЕНА УСПЕШНО (с Numba) ---[/bold green]"
             )
             console.print(f"Общее время выполнения: {execution_time_opt:.2f} сек.")
 

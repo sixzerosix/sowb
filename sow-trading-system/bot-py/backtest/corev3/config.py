@@ -10,7 +10,7 @@ from pathlib import Path
 SCRIPT_DIR = Path(__file__).resolve().parent.parent.parent
 FILE_PATH = (
     SCRIPT_DIR
-    / "backtest/data/BTC_USDT_1m_2025-08-01_00_00_00_to_2025-09-01_00_00_00.csv"
+    / "backtest/data/BTC_USDT_1m_2025-07-01_00_00_00_to_2025-09-01_00_00_00.csv"
 )
 print(FILE_PATH)
 # --- КОНФИГУРАЦИИ ---

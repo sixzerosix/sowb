@@ -4,7 +4,7 @@ import numpy as np
 import itertools
 import copy
 from typing import Tuple, Dict, Any, List, Generator
-from numba import jit  # <<< НОВЫЙ ИМПОРТ
+from numba import jit
 
 # Импорт модулей
 from backtest.core.config import StrategyConfig, PersistenceConfig, FILE_PATH
@@ -31,20 +31,21 @@ from backtest.core.strategy_configs import (
 
 # --- ПЕРЕКЛЮЧАТЕЛЬ РЕЖИМА ---
 # Установите:
-# - "SINGLE" для запуска одной стратегии (см. TARGET_CONFIG_NAME)
-# - "OPTIMIZE" для запуска цикла оптимизации (см. PARAMETER_SPACE)
+# - "SINGLE" для запуска одной стратегии
+# - "OPTIMIZE" для запуска цикла оптимизации
 RUN_MODE = "OPTIMIZE"
 
-# Какую стратегию запускать в режиме "SINGLE"
-TARGET_CONFIG_NAME = "SIMPLE_EMA_RSI_ATR"
+# Какую стратегию запускать в режиме "SINGLE" (используйте вашу конфигурацию из config.py)
+TARGET_CONFIG_NAME = "MR_SCALPER"
 
 
 # --- ПРОСТРАНСТВО ПАРАМЕТРОВ ДЛЯ ОПТИМИЗАЦИИ ---
 # Перебираемые параметры должны быть в виде списка.
 PARAMETER_SPACE: Dict[str, Dict[str, List[Any]]] = {
     "EMA_TREND": {"fast_len": [5, 7], "slow_len": [21, 34]},
-    "RSI": {"rsi_len": [14, 10], "overbought": [70], "oversold": [30]},
-    "ATR_EXIT": {"atr_len": [14], "atr_multiplier": [1.0, 1.5]},
+    "RSI": {"rsi_len": [10, 14], "oversold": [30]},
+    "ATR_EXIT": {"atr_len": [10, 14]},  # Добавляем ATR в оптимизацию
+    "HTF_FILTER": {"period": ["30min", "1H"]},  # Оптимизация периода HTF
 }
 
 
@@ -60,89 +61,132 @@ def numba_backtest_core(
     ema_fast: np.ndarray,
     ema_slow: np.ndarray,
     rsi_val: np.ndarray,
+    atr_val: np.ndarray,  # ATR для динамического SL/TP
+    macd_hist: np.ndarray,  # MACD для дополнительного фильтра
     oversold: float,
     overbought: float,
-    timestamps_seconds: np.ndarray,  # Временные метки в секундах
-    initial_capital: float,
+    target_roi_percent: float,
+    risk_roi_percent: float,
     leverage: float,
+    htf_trend_up: np.ndarray,  # HTF фильтр
 ) -> Tuple[np.ndarray, float]:
     """
-    Высокоскоростной торговый цикл, скомпилированный с Numba.
-    Работает только с массивами NumPy.
+    Высокоскоростной торговый цикл с полной логикой, скомпилированной с Numba.
 
-    Возвращает:
-    1. np.ndarray: Массив сделок (open_idx, close_idx, entry_price, exit_price, pnl, equity_after)
-    2. float: Финальный капитал
+    Вся логика входа, выхода, SL/TP и расчета PnL находится здесь.
     """
 
-    current_capital = initial_capital
+    current_capital = 1000.0  # Начальный капитал фиксирован для Numba
     is_long = False
 
     # Переменные для отслеживания текущей открытой позиции
     entry_price = 0.0
     open_idx = -1
 
-    # Список для временного хранения данных сделок.
-    # Используем фиксированный размер, чтобы Numba мог работать с массивом
-    # Макс. количество сделок = половина длины данных
+    # Динамические SL/TP (в цене)
+    stop_loss_price = 0.0
+    take_profit_price = 0.0
+
+    # Список для временного хранения данных сделок
     max_trades = len(closes) // 2
     trades_array = np.zeros((max_trades, 6), dtype=np.float64)
     trade_count = 0
 
     # Проходим по всем данным
     for i in range(len(closes)):
+        current_close = closes[i]
 
-        # --- СИГНАЛЫ ---
-        # Обращение к массивам индикаторов
+        # --- СИГНАЛЫ И ФИЛЬТРЫ ---
         ema_cross_up = ema_fast[i] > ema_slow[i]
         ema_cross_down = ema_fast[i] < ema_slow[i]
+
         is_oversold_signal = rsi_val[i] < oversold
         is_overbought_signal = rsi_val[i] > overbought
-        current_close = closes[i]
+
+        # MACD фильтр: гистограмма растет
+        macd_filter_pass = macd_hist[i] > 0.0
+
+        # HTF фильтр: Тренд на старшем ТФ должен быть восходящим
+        htf_filter_pass = htf_trend_up[i]
 
         # --- УПРАВЛЕНИЕ ПОЗИЦИЕЙ ---
 
-        # 1. СИГНАЛ НА ОТКРЫТИЕ (LONG)
-        if not is_long and ema_cross_up and is_oversold_signal:
-            if trade_count < max_trades:
-                entry_price = current_close
-                open_idx = i
-                is_long = True
+        # 1. ЗАКРЫТИЕ ПОЗИЦИИ (SL/TP)
+        if is_long:
+            pnl_value = 0.0
+            exit_price = 0.0
+            exit_reason = 0  # 0=Нет, 1=TP, 2=SL, 3=Trend, 4=End of data
 
-        # 2. СИГНАЛ НА ЗАКРЫТИЕ (EXIT)
-        elif is_long:
-            exit_signal = (
-                ema_cross_down  # Трендовый разворот
-                or is_overbought_signal  # Фиксация прибыли
-            )
+            # Check Take Profit
+            if current_close >= take_profit_price:
+                exit_price = take_profit_price
+                exit_reason = 1
 
-            if exit_signal:
+            # Check Stop Loss
+            elif current_close <= stop_loss_price:
+                exit_price = stop_loss_price
+                exit_reason = 2
+
+            # Check Trend Reversal (EMA Cross Down OR Overbought RSI)
+            # Добавим условие: если HTF тренд стал нисходящим, тоже закрываем
+            elif ema_cross_down or is_overbought_signal or not htf_filter_pass:
                 exit_price = current_close
+                exit_reason = 3
 
+            if exit_reason != 0:
                 # Расчет PnL
-                # PnL в процентах от цены
                 pnl_percent = (exit_price - entry_price) / entry_price
-                # PnL в USD (с учетом плеча)
                 pnl_value = current_capital * pnl_percent * leverage
-
                 final_equity = current_capital + pnl_value
 
-                # Запись сделки в массив (индексы, цены, PnL, капитал)
-                trades_array[trade_count] = np.array(
-                    [
-                        float(open_idx),  # index 0
-                        float(i),  # index 1
-                        entry_price,  # index 2
-                        exit_price,  # index 3
-                        pnl_value,  # index 4 (PnL)
-                        final_equity,  # index 5 (Equity After Trade)
-                    ]
-                )
+                # Запись сделки
+                if trade_count < max_trades:
+                    trades_array[trade_count] = np.array(
+                        [
+                            float(open_idx),
+                            float(i),
+                            entry_price,
+                            exit_price,
+                            pnl_value,
+                            final_equity,
+                        ]
+                    )
+                    trade_count += 1
 
                 current_capital = final_equity  # Обновляем капитал
                 is_long = False
                 open_idx = -1
-                trade_count += 1
+                stop_loss_price = 0.0
+                take_profit_price = 0.0
+
+        # 2. СИГНАЛ НА ОТКРЫТИЕ (LONG)
+        if not is_long:
+
+            # Полный сигнал входа LONG
+            # (EMA-кросс UP) AND (RSI - перепроданность) AND (HTF - UP) AND (MACD - UP)
+            entry_signal = (
+                ema_cross_up
+                and is_oversold_signal
+                and htf_filter_pass
+                and macd_filter_pass
+            )
+
+            if entry_signal:
+                if trade_count < max_trades:
+                    entry_price = current_close
+                    open_idx = i
+                    is_long = True
+
+                    # Расчет SL и TP в цене на основе ATR и % риска/цели
+                    atr_distance = atr_val[i]  # Берем ATR на текущей свече
+
+                    # target_roi_percent и risk_roi_percent теперь множители ATR
+                    # (хотя могут быть и множителями цены, для простоты берем ATR)
+                    target_move_in_price = atr_distance * target_roi_percent
+                    risk_move_in_price = atr_distance * risk_roi_percent
+
+                    take_profit_price = entry_price + target_move_in_price
+                    stop_loss_price = entry_price - risk_move_in_price
 
     # --- 3. ЗАКРЫТИЕ ОТКРЫТОЙ ПОЗИЦИИ (если цикл закончился) ---
     if is_long and open_idx != -1 and trade_count < max_trades:
@@ -177,16 +221,11 @@ def run_backtest(
 ) -> Tuple[Dict[str, Any], pd.DataFrame, pd.DataFrame]:
     """
     Основной цикл бэктеста: итерация по данным и исполнение сделок (теперь с Numba).
-
-    :param data: DataFrame с данными и индикаторами.
-    :param config: Объект StrategyConfig с параметрами.
-    :param is_optimization: Флаг, указывающий, что это прогон оптимизации.
-    :return: (Метрики, DataFrame сделок, DataFrame данных с сигналами)
     """
     df = data.copy()  # Рабочая копия данных
     initial_capital = config.initial_capital
 
-    # --- 1. РАСЧЕТ ИНДИКАТОРОВ ---
+    # --- 1. РАСЧЕТ ИНДИКАТОРОВ (ВЫПОЛНЯЕТСЯ В PYTHON) ---
     df_with_indicators = calculate_strategy_indicators(df, config)
 
     if len(df_with_indicators) < 100:
@@ -205,29 +244,56 @@ def run_backtest(
         )
 
     # --- 2. ПОДГОТОВКА ДАННЫХ ДЛЯ NUMBA (ТОЛЬКО NUMPY МАССИВЫ) ---
+    # Извлекаем все необходимые данные для Numba-ядра.
     closes = df_with_indicators["close"].values
-    ema_fast = df_with_indicators["ema_fast"].values
-    ema_slow = df_with_indicators["ema_slow"].values
-    rsi_val = df_with_indicators["rsi_val"].values
-    timestamps_seconds = (
-        df_with_indicators["timestamp"].apply(lambda x: x.timestamp()).values
-    )
 
-    oversold = config.indicator_set["RSI"]["oversold"]
-    overbought = config.indicator_set["RSI"]["overbought"]
+    # EMA/RSI для сигналов
+    ema_fast = df_with_indicators.get("ema_fast", np.array([])).values
+    ema_slow = df_with_indicators.get("ema_slow", np.array([])).values
+    rsi_val = df_with_indicators.get("rsi_val", np.array([])).values
+
+    # ATR для динамического SL/TP
+    # Используем значение по умолчанию 0.01, если ATR не рассчитан
+    atr_val = df_with_indicators.get("atr_val", np.full(len(closes), 0.01)).values
+
+    # MACD для фильтра
+    macd_hist = df_with_indicators.get("macd_hist", np.full(len(closes), 1.0)).values
+
+    # HTF ФИЛЬТР (Используем htf_trend_up)
+    if "htf_trend_up" in df_with_indicators.columns:
+        # Логика фильтра: HTF тренд UP, если быстрая EMA > медленной EMA
+        htf_trend_up_array = df_with_indicators["htf_trend_up"].values
+    else:
+        # Если HTF-колонки отсутствуют, фильтр HTF отключен (по умолчанию True).
+        htf_trend_up_array = np.full(len(closes), True, dtype=np.bool_)
+
+    # Параметры из Config
+    oversold = config.indicator_set.get("RSI", {}).get("oversold", 30.0)
+    overbought = config.indicator_set.get("RSI", {}).get("overbought", 70.0)
+
+    target_roi_percent = config.target_roi_percent
+    risk_roi_percent = config.risk_roi_percent
 
     # --- 3. ВЫЗОВ NUMBA-КОМПИЛИРОВАННОГО ЯДРА ---
+    # ПРИМЕЧАНИЕ: Если вы захотите использовать SWING, FIBO, BBANDS и т.д.,
+    # вам нужно будет добавить их массивы здесь и в def numba_backtest_core.
+
     trades_array, final_equity = numba_backtest_core(
         closes,
         ema_fast,
         ema_slow,
         rsi_val,
+        atr_val,
+        macd_hist,
         oversold,
         overbought,
-        timestamps_seconds,
-        initial_capital,
+        target_roi_percent,
+        risk_roi_percent,
         config.leverage,
+        htf_trend_up_array,
     )
+
+    # (Остальная часть run_backtest остается прежней)
 
     # --- 4. ПРЕОБРАЗОВАНИЕ РЕЗУЛЬТАТОВ ОБРАТНО В DATAFRAME ---
     trades_df = pd.DataFrame(
@@ -253,11 +319,11 @@ def run_backtest(
         return metrics, pd.DataFrame(), df_with_indicators
 
     # Добавляем временные метки (нужно взять из исходного DF по индексам)
-    trades_df["open_time"] = df_with_indicators.iloc[trades_df["open_idx"].astype(int)][
-        "timestamp"
-    ].values
+    trades_df["open_time"] = df_with_indicators.iloc[
+        trades_df["open_idx"].astype(int).values
+    ]["timestamp"].values
     trades_df["exit_time"] = df_with_indicators.iloc[
-        trades_df["close_idx"].astype(int)
+        trades_df["close_idx"].astype(int).values
     ]["timestamp"].values
 
     # Расчет ROI и длительности
@@ -279,9 +345,6 @@ def run_backtest(
     return metrics, trades_df, df_with_indicators
 
 
-# (Остальные функции calculate_trade_pnl, generate_configs, run_optimization, main остаются без изменений)
-
-
 def calculate_trade_pnl(
     entry_price: float,
     exit_price: float,
@@ -291,10 +354,8 @@ def calculate_trade_pnl(
 ) -> Tuple[float, float, float]:
     """
     Расчет PnL (в USD) и ROI (в %) для одной сделки.
-    Эта функция больше не используется в основной логике, но остается для обратной совместимости.
     """
 
-    # 1. Расчет базового PnL (изменение цены в %)
     if side == "LONG":
         pnl_percent = (exit_price - entry_price) / entry_price
     elif side == "SHORT":
@@ -302,12 +363,9 @@ def calculate_trade_pnl(
     else:
         raise ValueError("Неверное направление сделки (side).")
 
-    # 2. Учет плеча (leverage) и расчет ROI от капитала
-    # position_size здесь равен current_capital * leverage
     pnl_value = current_capital * pnl_percent * (position_size / current_capital)
     roi_percent = (pnl_value / current_capital) * 100
 
-    # 3. Обновление капитала
     final_equity = current_capital + pnl_value
 
     return pnl_value, roi_percent, final_equity
@@ -318,32 +376,31 @@ def generate_configs(
 ) -> Generator[StrategyConfig, None, None]:
     """Генератор, создающий комбинации StrategyConfig из пространства параметров."""
 
-    # 1. Извлечение всех параметров и их значений
     all_params = []
     indicator_names = []
 
     for indicator_name, params in parameter_space.items():
         indicator_names.append(indicator_name)
-        # Получаем список всех комбинаций для этого индикатора
         keys = list(params.keys())
         values = list(params.values())
 
-        # itertools.product создает все комбинации значений
         param_combinations = list(itertools.product(*values))
 
-        # Форматируем каждую комбинацию в виде словаря
         indicator_param_sets = [dict(zip(keys, combo)) for combo in param_combinations]
         all_params.append(indicator_param_sets)
 
-    # 2. Создание всех комбинаций индикаторов
-    # product для комбинаций словарей индикаторов
     for combo_of_indicator_sets in itertools.product(*all_params):
         new_config = copy.deepcopy(base_config)
 
-        # Сборка итогового indicator_set
-        final_indicator_set = {}
+        final_indicator_set = copy.deepcopy(base_config.indicator_set)
         for i, indicator_set in enumerate(combo_of_indicator_sets):
-            final_indicator_set[indicator_names[i]] = indicator_set
+
+            # Объединяем параметры оптимизации с базовыми параметрами индикатора
+            current_indicator_name = indicator_names[i]
+            base_params = final_indicator_set.get(current_indicator_name, {})
+            # Обновляем базовые параметры параметрами из оптимизации
+            base_params.update(indicator_set)
+            final_indicator_set[current_indicator_name] = base_params
 
         new_config.indicator_set = final_indicator_set
         yield new_config
@@ -364,19 +421,15 @@ def run_optimization(
 
     print("\n--- НАЧАЛО ОПТИМИЗАЦИИ ПАРАМЕТРОВ ---")
 
-    # Используем генератор для перебора конфигураций
     for run_num, current_config in enumerate(
         generate_configs(parameter_space, base_config), 1
     ):
         print(f"\n[RUN {run_num}] Тестирование: {current_config.indicator_set}")
 
-        # Запуск бэктеста с текущей конфигурацией
         metrics, trades_df, _ = run_backtest(data, current_config, is_optimization=True)
 
-        # Критерий выбора лучшей стратегии: Total PnL (можно изменить на 'Return (%)' или 'Profit Factor')
         current_pnl = metrics.get("Total PnL", -np.inf)
 
-        # Проверка и обновление лучшей конфигурации
         if current_pnl > best_total_pnl:
             best_total_pnl = current_pnl
             best_config = current_config
@@ -393,22 +446,29 @@ def run_optimization(
 
 def main():
     # Инициализация базовых конфигураций
-    # strategy_config = StrategyConfig(
-    #     initial_capital=1000.0,
-    #     leverage=1.0,
-    #     target_roi_percent=1.0,
-    #     risk_roi_percent=0.5,
-    #     # Базовый набор индикаторов для SINGLE-прогона
-    #     indicator_set={
-    #         "EMA_TREND": {"fast_len": 9, "slow_len": 21},
-    #         "RSI": {"rsi_len": 14, "overbought": 70, "oversold": 30},
-    #         "ATR_EXIT": {"atr_len": 14, "atr_multiplier": 1.0},
-    #     },
-    # )
+    strategy_config = StrategyConfig(
+        initial_capital=1000.0,
+        leverage=20.0,
+        target_roi_percent=1.2,
+        risk_roi_percent=1.0,
+        # Базовый набор индикаторов для SINGLE-прогона
+        indicator_set={
+            "EMA_TREND": {"fast_len": 20, "slow_len": 50},
+            "RSI": {"rsi_len": 10, "overbought": 70, "oversold": 30},
+            "ATR_EXIT": {"atr_len": 20},
+            "MACD": {"fast_len": 12, "slow_len": 26, "signal_len": 9},
+            # НОВЫЕ ПОЛНОСТЬЮ РАБОЧИЕ ИНДИКАТОРЫ:
+            "SWING_STRUCT": {"window": 15},  # Окно 15 свечей для обнаружения пиков
+            "HTF_FILTER": {"period": "1H", "ema_len": 20},  # Тренд 1H EMA(20)
+            "FIBO": {"level": 0.618},  # Уровень коррекции Фибоначчи
+            # Дополнительные индикаторы (данные будут рассчитаны, но не использованы в Numba-ядре)
+            "BOLLINGER_BANDS": {"bb_len": 20, "num_dev": 2.0},
+            "STOCHASTIC": {"k_len": 14, "d_len": 3},
+            "CCI": {"cci_len": 20},
+        },
+    )
 
     strategy_config = STRATEGY_CONFIG_MR_SCALPER
-    # strategy_config = STRATEGY_CONFIG_HFT_SCALPER
-    # strategy_config = STRATEGY_CONFIG_BREAKOUT_SCALPER
 
     persistence_config = PersistenceConfig(
         save_to_sqlite=False,
@@ -419,7 +479,6 @@ def main():
     )
 
     # --- 1. ЗАГРУЗКА ДАННЫХ ---
-    # FILE_PATH берется из config.py
     data = load_data(FILE_PATH)
     print(f"[MAIN] Загружено {len(data)} свечей.")
 
@@ -441,10 +500,8 @@ def main():
         display_results_rich(metrics, trades_df, execution_time)
 
         if not trades_df.empty:
-            # Сохранение и графики только для одиночного прогона
             persist_results(trades_df, persistence_config)
 
-            # Для построения графиков используем данные, возвращенные из calculate_metrics
             _, drawdown, equity_curve = calculate_metrics(
                 trades_df, strategy_config.initial_capital, metrics["Final Equity"]
             )
@@ -467,18 +524,14 @@ def main():
                 f"EMA Fast: {best_config.indicator_set.get('EMA_TREND', {}).get('fast_len', 'N/A')}"
             )
             print(
-                f"EMA Slow: {best_config.indicator_set.get('EMA_TREND', {}).get('slow_len', 'N/A')}"
-            )
-            print(
-                f"RSI Len: {best_config.indicator_set.get('RSI', {}).get('rsi_len', 'N/A')}"
+                f"HTF Period: {best_config.indicator_set.get('HTF_FILTER', {}).get('period', 'N/A')}"
             )
 
             display_results_rich(best_metrics, pd.DataFrame(), execution_time_opt)
 
-            # НОВОЕ: Сохраняем лучшую конфигурацию и ее метрики
+            # Сохраняем лучшую конфигурацию и ее метрики
             print("\n--- СОХРАНЕНИЕ ЛУЧШЕГО РЕЗУЛЬТАТА ---")
             if best_config and best_metrics:
-                # Используем новую функцию для сохранения лучших параметров
                 persist_optimization_result(
                     best_config, best_metrics, persistence_config
                 )
@@ -488,10 +541,7 @@ def main():
                 )
 
         else:
-            print("\n--- ОШИБКА ОПТИМИЗАЦИИ ---")
-            print(
-                "Не удалось найти лучшую конфигурацию. Все прогоны, вероятно, не смогли совершить сделки или их 'Total PnL' был слишком низким."
-            )
+            print("\n--- ОШИБКА ОПТИМИЗАЦИИ ---\n")
 
     else:
         print(

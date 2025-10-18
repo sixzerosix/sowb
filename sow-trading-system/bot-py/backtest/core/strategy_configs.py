@@ -76,14 +76,14 @@ STRATEGY_CONFIG_BREAKOUT_SCALPER = StrategyConfig(
 # Цель: Торговля от границ канала с возвратом к скользящей средней (центру BB).
 STRATEGY_CONFIG_MR_SCALPER = StrategyConfig(
     initial_capital=100.0,
-    leverage=20.0,
-    target_roi_percent=1.2,  # Тейк-профит у центра канала
-    risk_roi_percent=1.0,  # Стоп-лосс за границей канала
+    leverage=10.0,
+    target_roi_percent=20,  # Тейк-профит у центра канала
+    risk_roi_percent=10.0,  # Стоп-лосс за границей канала
     indicator_set={
         "EMA_TREND": {"fast_len": 20, "slow_len": 50},  # Медленный тренд для контекста
         "ATR_EXIT": {"atr_len": 20, "min_multiplier": 2.0},
         "SWING_STRUCT": {"window": 40},
-        "HTF_FILTER": {"period": "10min", "ema_fast_len": 12, "ema_slow_len": 26},
+        "HTF_FILTER": {"period": "30min", "ema_fast_len": 12, "ema_slow_len": 26},
         "FIBO": {"levels": np.array([0.382, 0.618], dtype=np.float64)},
         "RSI": {"rsi_len": 10},  # Средняя скорость RSI
         "MACD": {"fast_p": 12, "slow_p": 26, "signal_p": 9},

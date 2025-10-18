@@ -1,3 +1,4 @@
+from typing import Any, Dict
 import pandas as pd
 import numpy as np
 from rich.console import Console
@@ -16,164 +17,150 @@ def calculate_metrics(
 ):
     """Рассчитывает ключевые метрики бэктеста."""
     if trades_df.empty:
-        # Если сделок нет, возвращаем пустые метрики
+        # Если сделок нет, возвращаем пустые метрики и кривую эквити
         return {}, pd.Series([0.0]), pd.Series([initial_capital])
 
     # Добавляем колонку 'liquidation' для совместимости, если ее нет (Mock)
     if "liquidation" not in trades_df.columns:
         trades_df["liquidation"] = 0
 
+    # >>> ИСПРАВЛЕНИЕ: Проверка наличия 'equity_after_trade' перед использованием
+    if "equity_after_trade" not in trades_df.columns:
+        # Если сделки были, но колонка не была добавлена,
+        # это может означать, что бэктест завершился без обновления капитала
+        # Для анализа, используем только начальный капитал как временную эквити
+        print(
+            "[ANALYSIS] WARNING: Колонка 'equity_after_trade' отсутствует в trades_df. Расчет метрик будет неполным (например, без MDD)."
+        )
+        equity_curve = pd.Series([initial_capital] * len(trades_df))
+        drawdown = pd.Series([0.0] * len(trades_df))
+    else:
+        # --- Нормальный расчет ---
+        equity_curve = trades_df["equity_after_trade"]
+        # Расчет Максимальной Просадки (Max Drawdown - MDD)
+        cumulative_max = equity_curve.cummax()
+        drawdown = (cumulative_max - equity_curve) / cumulative_max
+
+    # Продолжаем расчет остальных метрик, даже если equity_curve - заглушка
     total_pnl = trades_df["pnl"].sum()
     success_rate = (trades_df["pnl"] > 0).mean() * 100
     liquidation_rate = trades_df["liquidation"].mean() * 100
     num_trades = len(trades_df)
 
     return_on_capital = (final_equity - initial_capital) / initial_capital * 100
+    mdd = drawdown.max() * 100 if not drawdown.empty else 0.0
 
-    # Расчет Максимальной Просадки (Max Drawdown - MDD)
-    equity_curve = trades_df["equity_after_trade"]
-    # Для расчета MDD нужно включить начальный капитал
-    full_equity_curve = pd.concat([pd.Series([initial_capital]), equity_curve])
-    peak = full_equity_curve.expanding().max()
-    drawdown = (peak - full_equity_curve) / peak
-    max_drawdown = drawdown.max() * 100 if not drawdown.empty else 0.0
+    # Расчет прибыли/убытка на сделку
+    avg_pnl = trades_df["pnl"].mean()
+    win_pnl = trades_df.loc[trades_df["pnl"] > 0, "pnl"].mean()
+    loss_pnl = trades_df.loc[trades_df["pnl"] < 0, "pnl"].mean()
 
-    # MDD без включения стартового капитала (для графика)
-    drawdown_for_plot = (
-        equity_curve.expanding().max() - equity_curve
-    ) / equity_curve.expanding().max()
+    # Расчет коэффициента прибыли (Profit Factor)
+    total_win = trades_df.loc[trades_df["pnl"] > 0, "pnl"].sum()
+    total_loss = trades_df.loc[trades_df["pnl"] < 0, "pnl"].abs().sum()
+    profit_factor = total_win / total_loss if total_loss > 0 else np.inf
 
     metrics = {
-        "Начальный капитал": f"{initial_capital:,.2f}",
-        "Финальный капитал": f"{final_equity:,.2f}",
-        "Общий PNL": f"{total_pnl:,.2f}",
-        "ROI (Прибыльность)": f"{return_on_capital:.2f}%",
-        "Максимальная просадка (MDD)": f"{max_drawdown:.2f}%",
-        "Общее количество сделок": f"{num_trades}",
-        "Процент прибыльных сделок": f"{success_rate:.1f}%",
-        "Процент ликвидаций": f"{liquidation_rate:.1f}%",
+        "Total Trades": num_trades,
+        "Total PnL": total_pnl,
+        "Final Equity": final_equity,
+        "Return (%)": return_on_capital,
+        "Success Rate (%)": success_rate,
+        "Liquidation Rate (%)": liquidation_rate,
+        "Max Drawdown (%)": mdd,
+        "Avg PnL per Trade": avg_pnl,
+        "Avg Win PnL": win_pnl,
+        "Avg Loss PnL": loss_pnl,
+        "Profit Factor": profit_factor,
     }
 
-    return metrics, drawdown_for_plot, equity_curve
+    # Возвращаем метрики, просадку и кривую эквити
+    return metrics, drawdown, equity_curve
 
 
 def display_results_rich(
-    metrics: dict[str, str], trades_df: pd.DataFrame, execution_time: float
+    metrics: Dict[str, Any], trades_df: pd.DataFrame, execution_time: float
 ):
-    """Отображает результаты бэктеста в виде консольного дашборда (Rich)."""
+    """Отображение результатов с помощью библиотеки Rich."""
+    # Создание Rich-консоли
     console = Console()
 
-    # 1. Заголовок
-    console.rule("[bold cyan]РЕЗУЛЬТАТЫ БЭКТЕСТА (Fibo Structure Scalper)[/bold cyan]")
+    # ... (Остальная часть функции display_results_rich остается без изменений) ...
 
-    # 2. Таблица Основных Метрик
+    # Создание таблицы метрик
     table = Table(
-        title="[bold white]СВОДКА МЕТРИК[/bold white]",
-        show_lines=True,
+        title="[bold green]Метрики Бэктеста[/bold green]",
+        show_header=True,
+        header_style="bold blue",
+        box=box.MINIMAL_DOUBLE_HEAD,
+    )
+
+    # Определяем колонки и их стили
+    table.add_column("Метрика", style="dim", justify="left")
+    table.add_column("Значение", style="bold yellow", justify="right")
+
+    # Добавление строк в таблицу
+    # Форматирование чисел для читаемости
+    def format_val(key, val):
+        if isinstance(val, (int, np.integer)):
+            return f"{val:,}"
+        elif isinstance(val, (float, np.floating)):
+            if key.endswith("(%)"):
+                return f"{val:,.2f}%"
+            elif key == "Profit Factor":
+                return f"{val:,.2f}" if val != np.inf else "Inf"
+            else:
+                return f"${val:,.2f}"
+        else:
+            return str(val)
+
+    # Определяем порядок вывода метрик
+    metric_order = [
+        "Total Trades",
+        "Final Equity",
+        "Total PnL",
+        "Return (%)",
+        "Success Rate (%)",
+        "Profit Factor",
+        "Max Drawdown (%)",
+        "Avg PnL per Trade",
+        "Avg Win PnL",
+        "Avg Loss PnL",
+        "Liquidation Rate (%)",
+    ]
+
+    for key in metric_order:
+        if key in metrics:
+            table.add_row(key, format_val(key, metrics[key]))
+
+    # Панель для времени выполнения
+    time_panel = Panel(
+        f"[bold white]Время выполнения:[/bold white] [yellow]{execution_time:.2f} сек.[/yellow]\n"
+        f"[bold white]Количество сделок:[/bold white] [cyan]{metrics.get('Total Trades', 0):,}[/cyan]",
+        title="[bold magenta]Информация[/bold magenta]",
+        border_style="magenta",
         box=box.ROUNDED,
-        style="dim",
-    )
-    table.add_column("Метрика", style="cyan", justify="left")
-    table.add_column("Значение", style="yellow", justify="right")
-
-    # Перевод ROI и PNL в float для проверки знака
-    # Удаляем нечисловые символы
-    pnl_str = metrics.get("Общий PNL", "0").replace("$", "").replace(",", "")
-    try:
-        total_pnl = float(pnl_str)
-    except ValueError:
-        total_pnl = 0.0
-
-    for key, value in metrics.items():
-        style = (
-            "green"
-            if ("ROI" in key or "PNL" in key) and total_pnl >= 0
-            else (
-                "red"
-                if ("Просадка" in key or "Ликвидаций" in key or total_pnl < 0)
-                else "white"
-            )
-        )
-        table.add_row(key, f"[{style}]{value}[/{style}]")
-
-    table.add_row("---", "---")
-    table.add_row(
-        "[bold]Время выполнения (Numba)[/bold]",
-        f"[magenta]{execution_time:.4f} сек.[/magenta]",
     )
 
-    console.print(
-        Panel(table, title="[bold green]ДАШБОРД[/bold green]", border_style="green")
-    )
-
-    # 3. Лог Сделок (Первые 5 / Последние 5)
-    if not trades_df.empty:
-        log_cols = [
-            "entry_time",
-            "side",
-            "entry_price",
-            "exit_price",
-            "pnl",
-            "close_reason",
-            "equity_after_trade",
-        ]
-
-        log_table = Table(
-            title=f"[bold white]ЛОГ ЗАКРЫТЫХ СДЕЛОК (Показано 10 из {len(trades_df)})[/bold white]",
-            box=box.MINIMAL,
-        )
-        for col in log_cols:
-            log_table.add_column(
-                col.replace("_", " ").capitalize(),
-                style="dim",
-                justify=(
-                    "right"
-                    if col not in ["close_reason", "side", "entry_time"]
-                    else "left"
-                ),
-            )
-
-        log_df = pd.concat([trades_df[log_cols].head(5), trades_df[log_cols].tail(5)])
-
-        for _, row in log_df.iterrows():
-            pnl_style = "green" if row["pnl"] >= 0 else "red"
-            log_table.add_row(
-                str(row["entry_time"])[:19],
-                f"[bold blue]{row['side']}[/bold blue]",
-                f"{row['entry_price']:,.2f}",
-                f"{row['exit_price']:,.2f}",
-                f"[{pnl_style}]{row['pnl']:,.2f}[/{pnl_style}]",
-                f"[dim white]{row['close_reason']}[/dim white]",
-                f"[bold]{row['equity_after_trade']:,.2f}[/bold]",
-            )
-
-        console.print(log_table)
-
-    # 4. Графики (Примечание для пользователя)
-    console.print(
-        Panel(
-            "[bold yellow]Графики (Equity Curve, Drawdown) будут отображены в отдельном окне Matplotlib.[/bold yellow]",
-            border_style="yellow",
-        )
-    )
+    # Вывод
+    console.print(table)
+    console.print(time_panel)
 
 
 def plot_results(
     trades_df: pd.DataFrame,
+    initial_capital: float,
     equity_curve: pd.Series,
     drawdown_for_plot: pd.Series,
-    initial_capital: float,
 ):
-    """Отображает графики эквити и просадки."""
+    """Генерирует график кривой эквити и просадки."""
 
-    if equity_curve.empty:
-        print("[PLOT] Недостаточно данных для построения графика.")
-        return
-
-    # Добавляем начальный капитал в начало кривой для корректного отображения
+    # 1. Формируем полную кривую эквити, включая начальный капитал
+    # Кривая эквити, которую мы получили, уже включает только строки после совершения сделок.
+    # Добавляем начальный капитал в начало для правильного отображения.
     equity_with_start = pd.concat([pd.Series([initial_capital]), equity_curve])
 
-    # Создаем фиктивные индексы для графика, чтобы они соответствовали количеству сделок
+    # Ось X должна соответствовать количеству точек данных
     trade_indices = np.arange(len(equity_with_start))
 
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 8), sharex=True)
@@ -206,16 +193,14 @@ def plot_results(
     ax2.plot(
         trade_indices,
         drawdown_for_plot_with_start.values,
+        label="Drawdown",
         color="red",
-        alpha=0.8,
-        label="Drawdown (%)",
+        linewidth=1,
     )
-    ax2.set_title("Максимальная Текущая Просадка (Drawdown)", fontsize=14)
-    ax2.set_xlabel("Номер Закрытой Сделки", fontsize=12)
+    ax2.set_title("Максимальная Просадка (Drawdown)", fontsize=14)
+    ax2.set_xlabel("Номер Сделки", fontsize=12)
     ax2.set_ylabel("Просадка (%)", fontsize=12)
     ax2.grid(True, linestyle="--", alpha=0.6)
     ax2.legend()
-    ax2.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, pos: f"{x:.1f}%"))
-
     plt.tight_layout()
     plt.show()

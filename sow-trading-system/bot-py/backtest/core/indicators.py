@@ -48,9 +48,15 @@ def _calculate_swing_struct(df: pd.DataFrame, params: Dict[str, Any]) -> pd.Data
 def _calculate_htf_filter(df: pd.DataFrame, params: Dict[str, Any]) -> pd.DataFrame:
     """Расчет HTF EMAs и их слияние (Merge with Higher Timeframe)."""
 
-    # Агрегация данных в HTF (старший таймфрейм)
+    # ВАЖНО: Когда 'timestamp' установлен как индекс, нам нужно сначала сбросить его
+    # для корректной работы set_index() и merge_asof()
+
+    # 1. Сброс индекса, чтобы 'timestamp' стал колонкой
+    df_reset = df.reset_index()
+
+    # 2. Агрегация данных в HTF (старший таймфрейм)
     df_htf = (
-        df.set_index("timestamp")
+        df_reset.set_index("timestamp")
         .resample(params.get("period", "30T"))  # "30T" for 30 minutes
         .agg(
             {
@@ -80,15 +86,19 @@ def _calculate_htf_filter(df: pd.DataFrame, params: Dict[str, Any]) -> pd.DataFr
     )
 
     # merge_asof позволяет сопоставить 1m бар с последним завершенным HTF баром
-    df = pd.merge_asof(
-        df.sort_values("timestamp"),
+    df_merged = pd.merge_asof(
+        df_reset.sort_values("timestamp"),
         df_htf_trend.sort_values("htf_timestamp"),
         left_on="timestamp",
         right_on="htf_timestamp",
         direction="backward",
     ).drop(columns=["htf_timestamp"])
+
+    # ВАЖНО: Восстанавливаем индекс времени перед возвратом
+    df_merged = df_merged.set_index("timestamp")
+
     print(f"--- DEBUG: Рассчитан HTF Filter (period={params.get('period', '30T')}).")
-    return df
+    return df_merged
 
 
 def _calculate_fibo(df: pd.DataFrame, params: Dict[str, Any]) -> pd.DataFrame:
@@ -272,6 +282,8 @@ def calculate_strategy_indicators(
         if indicator_name in INDICATOR_DISPATCHER:
             try:
                 # Динамический вызов функции расчета
+                # ПРИМЕЧАНИЕ: Если _calculate_htf_filter возвращает df с reset_index,
+                # это будет исправлено в конце этой функции, если мы не используем .reset_index()
                 df = INDICATOR_DISPATCHER[indicator_name](df, params)
             except Exception as e:
                 print(
@@ -283,7 +295,8 @@ def calculate_strategy_indicators(
             )
 
     # Удаляем NaN после всех расчетов
-    df_clean = df.dropna().reset_index(drop=True)
+    # ВАЖНОЕ ИСПРАВЛЕНИЕ: Удаляем .reset_index(drop=True), чтобы сохранить индекс времени!
+    df_clean = df.dropna()
 
     print(
         f"--- INFO: После расчета индикаторов осталось {len(df_clean)} строк (удалено NaN)."

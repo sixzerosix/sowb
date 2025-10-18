@@ -1,8 +1,6 @@
-import os
 from dataclasses import dataclass, field
 from typing import Dict, Any
 import numpy as np
-import pandas as pd  # Для типа индекса
 from pathlib import Path
 
 # --- ГЛОБАЛЬНЫЕ КОНСТАНТЫ (MOCK) ---
@@ -11,7 +9,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent.parent
 FILE_PATH = (
     SCRIPT_DIR / "data/BTC_USDT_1m_2025-07-01_00_00_00_to_2025-09-01_00_00_00.csv"
 )
-print(FILE_PATH)
+
 # --- КОНФИГУРАЦИИ ---
 
 
@@ -36,8 +34,10 @@ class PersistenceConfig:
     """
 
     save_to_sqlite: bool = False
-    sqlite_db_name: str = "backtest_results.db"
-    table_name: str = "trades"
     save_to_csv: bool = False
     save_to_txt: bool = False
-    output_file_prefix: str = "backtest_fibo_scalper_"
+    table_name: str = "backtest_results"
+    # Новое имя таблицы для оптимизации
+    optimization_table_name: str = "optimization_results"
+    sqlite_db_name: str = "backtest_results.db"
+    output_file_prefix: str = "trades_"

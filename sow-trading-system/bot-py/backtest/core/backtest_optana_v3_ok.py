@@ -29,10 +29,14 @@ class StrategyConfig:
     Конфигурация торговой стратегии и параметров индикаторов.
     """
 
-    initial_capital: float = 1000.0
-    leverage: float = 1.0  # Плечо (для упрощения в бэктесте не используется)
-    target_roi_percent: float = 1.0  # Целевой TP % от позиции
-    risk_roi_percent: float = 0.5  # Целевой SL % от позиции
+    # initial_capital: float = 1000.0
+    initial_capital: float = 100.0
+    # leverage: float = 1.0  # Плечо (для упрощения в бэктесте не используется)
+    # target_roi_percent: float = 1.0  # Целевой TP % от позиции
+    # risk_roi_percent: float = 0.5  # Целевой SL % от позиции
+    leverage: float = 10.0  # Плечо (для упрощения в бэктесте не используется)
+    target_roi_percent: float = 10.0  # Целевой TP % от позиции
+    risk_roi_percent: float = 5.0  # Целевой SL % от позиции
     # Словарь для динамической настройки индикаторов
     indicator_set: Dict[str, Dict[str, Any]] = field(default_factory=dict)
 
@@ -45,7 +49,7 @@ class PersistenceConfig:
 
     save_to_sqlite: bool = False
     save_to_csv: bool = False
-    save_to_txt: bool = False
+    save_to_txt: bool = True
     sqlite_db_name: str = "backtest_results.db"
     optimization_table_name: str = "optimization_results"
     output_file_prefix: str = "trades_"
@@ -65,12 +69,12 @@ class OptimizationParams:
         75,
     )  # Уровень перекупленности для SHORT входа
     ATR_LEN_RANGE: Tuple[int, int] = (5, 30)
-    N_TRIALS: int = 100  # Увеличено для более качественной оптимизации
+    N_TRIALS: int = 300  # Увеличено для более качественной оптимизации
     OPTIMIZATION_METRIC: str = "Total PnL"
 
 
 DEFAULT_CONFIG = StrategyConfig(
-    initial_capital=1000.0,
+    initial_capital=100.0,
     indicator_set={
         "EMA_TREND": {"fast_len": 9, "slow_len": 21},
         "ATR_STOP": {"atr_len": 14, "multiplier": 1.5},

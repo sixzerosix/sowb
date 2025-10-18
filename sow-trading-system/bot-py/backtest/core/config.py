@@ -22,7 +22,7 @@ class StrategyConfig:
     Конфигурация торговой стратегии и параметров индикаторов.
     """
 
-    initial_capital: float = 1000.0
+    initial_capital: float = 100.0
     leverage: float = 1.0
     target_roi_percent: float = 1.0
     risk_roi_percent: float = 0.5
